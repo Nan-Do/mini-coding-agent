@@ -226,7 +226,7 @@ class LlamaCppModelClient:
 
     def complete(self, system, prompt, max_new_tokens):
         payload = {
-            "model": self.model,
+            "model": "not-needed",
             "messages": self.__build_messages(system, prompt),
             "temperature": self.temperature,
             "top_p": self.top_p,
@@ -1053,7 +1053,7 @@ def build_arg_parser():
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
     parser.add_argument(
-        "--model", default="qwen3.5:4b", help="Model name (unsed right now)."
+        "--model", default="qwen3.5:4b", help="Model name (not used right now)."
     )
     parser.add_argument(
         "--host", default="http://127.0.0.1:8080", help="llama-server URL."
