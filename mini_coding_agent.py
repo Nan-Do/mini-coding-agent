@@ -33,7 +33,15 @@ HELP_DETAILS = "\n".join(
 )
 MAX_TOOL_OUTPUT = 4000
 MAX_HISTORY = 12000
-IGNORED_PATH_NAMES = {".git", ".mini-coding-agent", "__pycache__", ".pytest_cache", ".ruff_cache", ".venv", "venv"}
+IGNORED_PATH_NAMES = {
+    ".git",
+    ".mini-coding-agent",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "venv",
+}
 
 ##############################
 #### Six Agent Components ####
@@ -73,7 +81,16 @@ def middle(text, limit):
 #### 1) Live Repo Context ####
 ##############################
 class WorkspaceContext:
-    def __init__(self, cwd, repo_root, branch, default_branch, status, recent_commits, project_docs):
+    def __init__(
+        self,
+        cwd,
+        repo_root,
+        branch,
+        default_branch,
+        status,
+        recent_commits,
+        project_docs,
+    ):
         self.cwd = cwd
         self.repo_root = repo_root
         self.branch = branch
@@ -110,34 +127,51 @@ class WorkspaceContext:
                 key = str(path.relative_to(repo_root))
                 if key in docs:
                     continue
-                docs[key] = clip(path.read_text(encoding="utf-8", errors="replace"), 1200)
+                docs[key] = clip(
+                    path.read_text(encoding="utf-8", errors="replace"), 1200
+                )
 
         return cls(
             cwd=str(cwd),
             repo_root=str(repo_root),
             branch=git(["branch", "--show-current"], "-") or "-",
-            default_branch=(git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], "origin/main") or "origin/main").removeprefix("origin/"),
+            default_branch=(
+                git(
+                    ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+                    "origin/main",
+                )
+                or "origin/main"
+            ).removeprefix("origin/"),
             status=clip(git(["status", "--short"], "clean") or "clean", 1500),
-            recent_commits=[line for line in git(["log", "--oneline", "-5"]).splitlines() if line],
+            recent_commits=[
+                line for line in git(["log", "--oneline", "-5"]).splitlines() if line
+            ],
             project_docs=docs,
         )
 
     def text(self):
         commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
-        docs = "\n".join(f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()) or "- none"
-        return "\n".join([
-            "Workspace:",
-            f"- cwd: {self.cwd}",
-            f"- repo_root: {self.repo_root}",
-            f"- branch: {self.branch}",
-            f"- default_branch: {self.default_branch}",
-            "- status:",
-            self.status,
-            "- recent_commits:",
-            commits,
-            "- project_docs:",
-            docs,
-        ])
+        docs = (
+            "\n".join(
+                f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()
+            )
+            or "- none"
+        )
+        return "\n".join(
+            [
+                "Workspace:",
+                f"- cwd: {self.cwd}",
+                f"- repo_root: {self.repo_root}",
+                f"- branch: {self.branch}",
+                f"- default_branch: {self.default_branch}",
+                "- status:",
+                self.status,
+                "- recent_commits:",
+                commits,
+                "- project_docs:",
+                docs,
+            ]
+        )
 
 
 ##############################
@@ -176,7 +210,13 @@ class FakeModelClient:
         return self.outputs.pop(0)
 
 
-class OllamaModelClient:
+class LlamaCppModelClient:
+    def __build_messages(self, system, prompt):
+        return [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+
     def __init__(self, model, host, temperature, top_p, timeout):
         self.model = model
         self.host = host.rstrip("/")
@@ -184,21 +224,16 @@ class OllamaModelClient:
         self.top_p = top_p
         self.timeout = timeout
 
-    def complete(self, prompt, max_new_tokens):
+    def complete(self, system, prompt, max_new_tokens):
         payload = {
             "model": self.model,
-            "prompt": prompt,
-            "stream": False,
-            "raw": False,
-            "think": False,
-            "options": {
-                "num_predict": max_new_tokens,
-                "temperature": self.temperature,
-                "top_p": self.top_p,
-            },
+            "messages": self.__build_messages(system, prompt),
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_tokens": max_new_tokens,
         }
         request = urllib.request.Request(
-            self.host + "/api/generate",
+            self.host + "/v1/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -208,18 +243,20 @@ class OllamaModelClient:
                 data = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"Ollama request failed with HTTP {exc.code}: {body}") from exc
+            raise RuntimeError(
+                f"LlamaCpp request failed with HTTP {exc.code}: {body}"
+            ) from exc
         except urllib.error.URLError as exc:
             raise RuntimeError(
-                "Could not reach Ollama.\n"
-                "Make sure `ollama serve` is running and the model is available.\n"
+                "Could not reach LlamaCpp.\n"
+                "Make sure `llama-server` is running.\n"
                 f"Host: {self.host}\n"
                 f"Model: {self.model}"
             ) from exc
 
         if data.get("error"):
-            raise RuntimeError(f"Ollama error: {data['error']}")
-        return data.get("response", "")
+            raise RuntimeError(f"Llama-server error: {data['error']}")
+        return data["choices"][0]["message"]["content"]
 
 
 class MiniAgent:
@@ -333,7 +370,9 @@ class MiniAgent:
     def build_prefix(self):
         tool_lines = []
         for name, tool in self.tools.items():
-            fields = ", ".join(f"{key}: {value}" for key, value in tool["schema"].items())
+            fields = ", ".join(
+                f"{key}: {value}" for key, value in tool["schema"].items()
+            )
             risk = "approval required" if tool["risky"] else "safe"
             tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
         tool_text = "\n".join(tool_lines)
@@ -347,42 +386,48 @@ class MiniAgent:
                 "<final>Done.</final>",
             ]
         )
-        rules = "\n".join([
-            "- Use tools instead of guessing about the workspace.",
-            "- Return exactly one <tool>...</tool> or one <final>...</final>.",
-            "- Tool calls must look like:",
-            '  <tool>{"name":"tool_name","args":{...}}</tool>',
-            "- For write_file and patch_file with multi-line text, prefer XML style:",
-            '  <tool name="write_file" path="file.py"><content>...</content></tool>',
-            "- Final answers must look like:",
-            "  <final>your answer</final>",
-            "- Never invent tool results.",
-            "- Keep answers concise and concrete.",
-            "- If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.",
-            "- Before writing tests for existing code, read the implementation first.",
-            "- When writing tests, match the current implementation unless the user explicitly asked you to change the code.",
-            "- New files should be complete and runnable, including obvious imports.",
-            "- Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.",
-            "- Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={}.",
-        ])
-        return "\n\n".join([
-            "You are Mini-Coding-Agent, a small local coding agent running through Ollama.",
-            "Rules:\n" + rules,
-            "Tools:\n" + tool_text,
-            "Valid response examples:\n" + examples,
-            self.workspace.text(),
-        ])
+        rules = "\n".join(
+            [
+                "- Use tools instead of guessing about the workspace.",
+                "- Return exactly one <tool>...</tool> or one <final>...</final>.",
+                "- Tool calls must look like:",
+                '  <tool>{"name":"tool_name","args":{...}}</tool>',
+                "- For write_file and patch_file with multi-line text, prefer XML style:",
+                '  <tool name="write_file" path="file.py"><content>...</content></tool>',
+                "- Final answers must look like:",
+                "  <final>your answer</final>",
+                "- Never invent tool results.",
+                "- Keep answers concise and concrete.",
+                "- If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.",
+                "- Before writing tests for existing code, read the implementation first.",
+                "- When writing tests, match the current implementation unless the user explicitly asked you to change the code.",
+                "- New files should be complete and runnable, including obvious imports.",
+                "- Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.",
+                "- Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={}.",
+            ]
+        )
+        return "\n\n".join(
+            [
+                "You are Mini-Coding-Agent, a small local coding agent running through llama-server.",
+                "Rules:\n" + rules,
+                "Tools:\n" + tool_text,
+                "Valid response examples:\n" + examples,
+                self.workspace.text(),
+            ]
+        )
 
     def memory_text(self):
         memory = self.session["memory"]
         notes = "\n".join(f"- {note}" for note in memory["notes"]) or "- none"
-        return "\n".join([
-            "Memory:",
-            f"- task: {memory['task'] or '-'}",
-            f"- files: {', '.join(memory['files']) or '-'}",
-            "- notes:",
-            notes,
-        ])
+        return "\n".join(
+            [
+                "Memory:",
+                f"- task: {memory['task'] or '-'}",
+                f"- files: {', '.join(memory['files']) or '-'}",
+                "- notes:",
+                notes,
+            ]
+        )
 
     #####################################################
     #### 4) Context Reduction And Output Management #####
@@ -408,7 +453,9 @@ class MiniAgent:
 
             if item["role"] == "tool":
                 limit = 900 if recent else 180
-                lines.append(f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}")
+                lines.append(
+                    f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}"
+                )
                 lines.append(clip(item["content"], limit))
             else:
                 limit = 900 if recent else 220
@@ -420,12 +467,13 @@ class MiniAgent:
     #### 2) Prompt Shape And Cache Reuse (Continued) #######
     ########################################################
     def prompt(self, user_message):
-        return "\n\n".join([
-            self.prefix,
-            self.memory_text(),
-            "Transcript:\n" + self.history_text(),
-            "Current user request:\n" + user_message,
-        ])
+        return self.prefix, "\n\n".join(
+            [
+                self.memory_text(),
+                "Transcript:\n" + self.history_text(),
+                "Current user request:\n" + user_message,
+            ]
+        )
 
     ###############################################
     #### 5) Session Memory (Continued) ###########
@@ -454,7 +502,10 @@ class MiniAgent:
 
         while tool_steps < self.max_steps and attempts < max_attempts:
             attempts += 1
-            raw = self.model_client.complete(self.prompt(user_message), self.max_new_tokens)
+            system_prompt, user_prompt = self.prompt(user_message)
+            raw = self.model_client.complete(
+                system_prompt, user_prompt, self.max_new_tokens
+            )
             kind, payload = self.parse(raw)
 
             if kind == "tool":
@@ -475,7 +526,9 @@ class MiniAgent:
                 continue
 
             if kind == "retry":
-                self.record({"role": "assistant", "content": payload, "created_at": now()})
+                self.record(
+                    {"role": "assistant", "content": payload, "created_at": now()}
+                )
                 continue
 
             final = (payload or raw).strip()
@@ -515,7 +568,9 @@ class MiniAgent:
             return f"error: tool {name} failed: {exc}"
 
     def repeated_tool_call(self, name, args):
-        tool_events = [item for item in self.session["history"] if item["role"] == "tool"]
+        tool_events = [
+            item for item in self.session["history"] if item["role"] == "tool"
+        ]
         if len(tool_events) < 2:
             return False
         recent = tool_events[-2:]
@@ -607,7 +662,9 @@ class MiniAgent:
         if self.approval_policy == "never":
             return False
         try:
-            answer = input(f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] ")
+            answer = input(
+                f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] "
+            )
         except EOFError:
             return False
         return answer.strip().lower() in {"y", "yes"}
@@ -615,23 +672,33 @@ class MiniAgent:
     @staticmethod
     def parse(raw):
         raw = str(raw)
-        if "<tool>" in raw and ("<final>" not in raw or raw.find("<tool>") < raw.find("<final>")):
+        if "<tool>" in raw and (
+            "<final>" not in raw or raw.find("<tool>") < raw.find("<final>")
+        ):
             body = MiniAgent.extract(raw, "tool")
             try:
                 payload = json.loads(body)
             except Exception:
-                return "retry", MiniAgent.retry_notice("model returned malformed tool JSON")
+                return "retry", MiniAgent.retry_notice(
+                    "model returned malformed tool JSON"
+                )
             if not isinstance(payload, dict):
-                return "retry", MiniAgent.retry_notice("tool payload must be a JSON object")
+                return "retry", MiniAgent.retry_notice(
+                    "tool payload must be a JSON object"
+                )
             if not str(payload.get("name", "")).strip():
-                return "retry", MiniAgent.retry_notice("tool payload is missing a tool name")
+                return "retry", MiniAgent.retry_notice(
+                    "tool payload is missing a tool name"
+                )
             args = payload.get("args", {})
             if args is None:
                 payload["args"] = {}
             elif not isinstance(args, dict):
                 return "retry", MiniAgent.retry_notice()
             return "tool", payload
-        if "<tool" in raw and ("<final>" not in raw or raw.find("<tool") < raw.find("<final>")):
+        if "<tool" in raw and (
+            "<final>" not in raw or raw.find("<tool") < raw.find("<final>")
+        ):
             payload = MiniAgent.parse_xml_tool(raw)
             if payload is not None:
                 return "tool", payload
@@ -640,7 +707,9 @@ class MiniAgent:
             final = MiniAgent.extract(raw, "final").strip()
             if final:
                 return "final", final
-            return "retry", MiniAgent.retry_notice("model returned an empty <final> answer")
+            return "retry", MiniAgent.retry_notice(
+                "model returned an empty <final> answer"
+            )
         raw = raw.strip()
         if raw:
             return "final", raw
@@ -670,7 +739,15 @@ class MiniAgent:
 
         body = match.group("body")
         args = dict(attrs)
-        for key in ("content", "old_text", "new_text", "command", "task", "pattern", "path"):
+        for key in (
+            "content",
+            "old_text",
+            "new_text",
+            "command",
+            "task",
+            "pattern",
+            "path",
+        ):
             if f"<{key}>" in body:
                 args[key] = MiniAgent.extract_raw(body, key)
 
@@ -684,8 +761,12 @@ class MiniAgent:
     @staticmethod
     def parse_attrs(text):
         attrs = {}
-        for match in re.finditer(r"""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", text):
-            attrs[match.group(1)] = match.group(2) if match.group(2) is not None else match.group(3)
+        for match in re.finditer(
+            r"""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", text
+        ):
+            attrs[match.group(1)] = (
+                match.group(2) if match.group(2) is not None else match.group(3)
+            )
         return attrs
 
     @staticmethod
@@ -744,7 +825,10 @@ class MiniAgent:
         if not path.is_dir():
             raise ValueError("path is not a directory")
         entries = [
-            item for item in sorted(path.iterdir(), key=lambda item: (item.is_file(), item.name.lower()))
+            item
+            for item in sorted(
+                path.iterdir(), key=lambda item: (item.is_file(), item.name.lower())
+            )
             if item.name not in IGNORED_PATH_NAMES
         ]
         lines = []
@@ -762,7 +846,10 @@ class MiniAgent:
         if start < 1 or end < start:
             raise ValueError("invalid line range")
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        body = "\n".join(f"{number:>4}: {line}" for number, line in enumerate(lines[start - 1:end], start=start))
+        body = "\n".join(
+            f"{number:>4}: {line}"
+            for number, line in enumerate(lines[start - 1 : end], start=start)
+        )
         return f"# {path.relative_to(self.root)}\n{body}"
 
     def tool_search(self, args):
@@ -781,14 +868,28 @@ class MiniAgent:
             return result.stdout.strip() or result.stderr.strip() or "(no matches)"
 
         matches = []
-        files = [path] if path.is_file() else [
-            item for item in path.rglob("*")
-            if item.is_file() and not any(part in IGNORED_PATH_NAMES for part in item.relative_to(self.root).parts)
-        ]
+        files = (
+            [path]
+            if path.is_file()
+            else [
+                item
+                for item in path.rglob("*")
+                if item.is_file()
+                and not any(
+                    part in IGNORED_PATH_NAMES
+                    for part in item.relative_to(self.root).parts
+                )
+            ]
+        )
         for file_path in files:
-            for number, line in enumerate(file_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
+            for number, line in enumerate(
+                file_path.read_text(encoding="utf-8", errors="replace").splitlines(),
+                start=1,
+            ):
                 if pattern.lower() in line.lower():
-                    matches.append(f"{file_path.relative_to(self.root)}:{number}:{line}")
+                    matches.append(
+                        f"{file_path.relative_to(self.root)}:{number}:{line}"
+                    )
                     if len(matches) >= 200:
                         return "\n".join(matches)
         return "\n".join(matches) or "(no matches)"
@@ -838,7 +939,9 @@ class MiniAgent:
         count = text.count(old_text)
         if count != 1:
             raise ValueError(f"old_text must occur exactly once, found {count}")
-        path.write_text(text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8")
+        path.write_text(
+            text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8"
+        )
         return f"patched {path.relative_to(self.root)}"
 
     ###################################################
@@ -912,12 +1015,12 @@ def build_welcome(agent, model, host):
 def build_agent(args):
     workspace = WorkspaceContext.build(args.cwd)
     store = SessionStore(Path(workspace.repo_root) / ".mini-coding-agent" / "sessions")
-    model = OllamaModelClient(
+    model = LlamaCppModelClient(
         model=args.model,
         host=args.host,
         temperature=args.temperature,
         top_p=args.top_p,
-        timeout=args.ollama_timeout,
+        timeout=args.llama_timeout,
     )
     session_id = args.resume
     if session_id == "latest":
@@ -945,24 +1048,55 @@ def build_agent(args):
 def build_arg_parser():
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Minimal coding agent for Ollama models.",
+        description="Minimal coding agent for llama-server models.",
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument("--model", default="qwen3.5:4b", help="Ollama model name.")
-    parser.add_argument("--host", default="http://127.0.0.1:11434", help="Ollama server URL.")
-    parser.add_argument("--ollama-timeout", type=int, default=300, help="Ollama request timeout in seconds.")
-    parser.add_argument("--resume", default=None, help="Session id to resume or 'latest'.")
+    parser.add_argument(
+        "--model", default="qwen3.5:4b", help="Model name (unsed right now)."
+    )
+    parser.add_argument(
+        "--host", default="http://127.0.0.1:8080", help="llama-server URL."
+    )
+    parser.add_argument(
+        "--llama-timeout",
+        type=int,
+        default=300,
+        help="Llama request timeout in seconds.",
+    )
+    parser.add_argument(
+        "--resume", default=None, help="Session id to resume or 'latest'."
+    )
     parser.add_argument(
         "--approval",
         choices=("ask", "auto", "never"),
         default="ask",
         help="Approval policy for risky tools; auto grants the model arbitrary command execution and file writes.",
     )
-    parser.add_argument("--max-steps", type=int, default=6, help="Maximum tool/model iterations per request.")
-    parser.add_argument("--max-new-tokens", type=int, default=512, help="Maximum model output tokens per step.")
-    parser.add_argument("--temperature", type=float, default=0.2, help="Sampling temperature sent to Ollama.")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Top-p sampling value sent to Ollama.")
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=6,
+        help="Maximum tool/model iterations per request.",
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=512,
+        help="Maximum model output tokens per step.",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.2,
+        help="Sampling temperature sent to llama-server.",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=0.9,
+        help="Top-p sampling value sent to llama-server.",
+    )
     return parser
 
 
