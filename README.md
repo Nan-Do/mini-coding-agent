@@ -1,4 +1,5 @@
 &nbsp;
+
 # Mini-Coding-Agent
 
 This folder contains a small standalone coding agent:
@@ -15,7 +16,7 @@ It is a minimal local agent loop with:
 - transcript and memory persistence
 - bounded delegation
 
-The model backend is currently based on Ollama.
+The model backend is currently based on llama.cpp.
 
 <a href="https://magazine.sebastianraschka.com/p/components-of-a-coding-agent">
   <img src="https://substack-post-media.s3.amazonaws.com/public/images/49b97718-57f4-4977-99c8-8ad5c4d32af3_1548x862.png" width="500px">
@@ -25,8 +26,8 @@ The model backend is currently based on Ollama.
 
 **[The detailed tutorial: Components of a Coding Agent](https://magazine.sebastianraschka.com/p/components-of-a-coding-agent)**
 
-
 &nbsp;
+
 ## Six Core Components
 
 <a href="https://magazine.sebastianraschka.com/p/components-of-a-coding-agent">
@@ -49,13 +50,13 @@ This coding harness is organized around six practical building blocks:
    Scoped subtasks can be delegated to helper agents that inherit enough context to help (but operate within limits).
 
 &nbsp;
+
 ## Requirements
 
 You need:
 
 - Python 3.10+
-- Ollama installed
-- an Ollama model pulled locally
+- llama.cpp installed (llama-server)
 
 Optional:
 
@@ -64,43 +65,25 @@ Optional:
 This project has no Python runtime dependency beyond the standard library, so you can run it directly with `python mini_coding_agent.py` if you do not want to use `uv`.
 
 &nbsp;
-## Install Ollama
 
-Install Ollama on your machine so the `ollama` command is available in your shell.
+## Install llama.cpp
 
-Official installation link: [ollama.com/download](https://ollama.com/download)
+Install llama.cpp on your machine so the `llama-server` command is available in your shell.
+
+Llama.cpp link: [llama.cpp](https://github.com/ggml-org/llama.cpp)
 
 Then verify:
 
 ```bash
-ollama --help
+llama-server --help
 ```
 
-Start the server:
-
-```bash
-ollama serve
-```
-
-In another terminal, pull a model. Example:
-
-```bash
-ollama pull qwen3.5:4b
-```
-
-Qwen 3.5 model library:
-
-- [ollama.com/library/qwen3.5](https://ollama.com/library/qwen3.5)
-
-The default in this project is `qwen3.5:4b`. If you have sufficient memory, it is worth trying a larger model such as `qwen3.5:9b` or another larger Qwen 3.5 variant. The agent just sends prompts to Ollama's `/api/generate` endpoint.
-
-&nbsp;
 ## Project Setup
 
 Clone the repo or your fork and change into it:
 
 ```bash
-git clone https://github.com/rasbt/mini-coding-agent.git
+git clone https://github.com/Nan-Do/mini-coding-agent.git
 cd mini-coding-agent
 ```
 
@@ -111,9 +94,8 @@ git clone https://github.com/<your-github-user>/mini-coding-agent.git
 cd mini-coding-agent
 ```
 
-
-
 &nbsp;
+
 ## Basic Usage
 
 Start the agent:
@@ -132,12 +114,12 @@ python mini_coding_agent.py
 
 By default it uses:
 
-- model: `qwen3.5:4b`
 - approval: `ask`
 
 For a concrete usage example, see [EXAMPLE.md](EXAMPLE.md).
 
 &nbsp;
+
 ## Approval Modes
 
 Risky tools such as shell commands and file writes are gated by approval.
@@ -155,9 +137,8 @@ Example:
 uv run mini-coding-agent --approval auto
 ```
 
-
-
 &nbsp;
+
 ## Resume Sessions
 
 The agent saves sessions under the target workspace root in:
@@ -172,15 +153,14 @@ Resume the latest session:
 uv run mini-coding-agent --resume latest
 ```
 
-
 Resume a specific session:
 
 ```bash
 uv run mini-coding-agent --resume 20260401-144025-2dd0aa
 ```
 
-
 &nbsp;
+
 ## Interactive Commands
 
 Inside the REPL, slash commands are handled directly by the agent instead of
@@ -200,6 +180,7 @@ being sent to the model as a normal task.
   exits the interactive session; alias for `/exit`
 
 &nbsp;
+
 ## Main CLI Flags
 
 ```bash
@@ -220,11 +201,11 @@ Important flags:
 - `--cwd`
   sets the workspace directory the agent should inspect and modify; default: `.`
 - `--model`
-  selects the Ollama model name, such as `qwen3.5:4b`; default: `qwen3.5:4b`
+  selects the llama model name, such as `qwen3.5:4b`; default: `qwen3.5:4b` (currently does nothing)
 - `--host`
-  points the agent at the Ollama server URL (usually not needed); default: `http://127.0.0.1:11434`
-- `--ollama-timeout`
-  controls how long the client waits for an Ollama response (usually not needed); default: `300` seconds
+  points the agent at the llama-server URL (usually not needed); default: `http://127.0.0.1:11434`
+- `--llama-timeout`
+  controls how long the client waits for an llama-server response (usually not needed); default: `300` seconds
 - `--resume`
   resumes a saved session by id or uses `latest`; default: start a new session
 - `--approval`
@@ -239,14 +220,16 @@ Important flags:
   controls nucleus sampling for generation; default: `0.9`
 
 &nbsp;
+
 ## Example
 
 See [EXAMPLE.md](EXAMPLE.md)
 
 &nbsp;
+
 ## Notes & Tips
 
 - The agent expects the model to emit either `<tool>...</tool>` or `<final>...</final>`.
-- Different Ollama models will follow those instructions with different reliability.
+- Different models will follow those instructions with different reliability.
 - If the model does not follow the format well, use a stronger instruction-following model.
 - The agent is intentionally small and optimized for readability, not robustness.
