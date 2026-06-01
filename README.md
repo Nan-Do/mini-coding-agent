@@ -203,7 +203,9 @@ Important flags:
 - `--model`
   selects the llama model name, such as `qwen3.5:4b`; default: `qwen3.5:4b` (currently does nothing)
 - `--host`
-  points the agent at the llama-server URL (usually not needed); default: `http://127.0.0.1:11434`
+  points the agent at the llama-server host address (usually not needed); default: `127.0.0.1`
+- `--port`
+  points the agent at the llama-server port address (usually not needed); default: `8080`
 - `--llama-timeout`
   controls how long the client waits for an llama-server response (usually not needed); default: `300` seconds
 - `--resume`
