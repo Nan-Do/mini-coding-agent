@@ -1,4 +1,5 @@
 &nbsp;
+
 # Interactive Example
 
 This is a hands-on example workflow for using `mini-coding-agent` with Ollama on a small Python project.
@@ -15,16 +16,10 @@ The flow is:
 
 This example assumes:
 
-- `ollama serve` is already running
-- you already pulled a model such as `qwen3.5:4b` (e.g., via `ollama pull qwen3.5:4b` )
+- `llama-server` is already running
 - you already cloned or forked `rasbt/mini-coding-agent`
 - you already ran `uv sync` in your local `mini-coding-agent` folder
 
-If you have sufficient memory, consider using a larger Qwen 3.5 model instead:
-
-- [ollama.com/library/qwen3.5](https://ollama.com/library/qwen3.5)
-
-&nbsp;
 ## 1. Create a fresh repo
 
 ```bash
@@ -41,6 +36,7 @@ ls -la
 ```
 
 &nbsp;
+
 ## 2. Launch the agent
 
 Open the agent from your `mini-coding-agent` clone, but point it at the new repo:
@@ -53,8 +49,6 @@ uv run mini-coding-agent \
 ```
 
 <img src="https://sebastianraschka.com/images/github/mini-coding-agent/1.webp" width="500px">
-
-
 
 &nbsp;
 
@@ -71,6 +65,7 @@ After the agent finishes, inspect the result in another terminal or code editor.
 <img src="https://sebastianraschka.com/images/github/mini-coding-agent/2.webp" width="200px">
 
 &nbsp;
+
 ## 4. Ask it to edit the implementation
 
 Now make a small follow-up change. Back in the agent REPL, paste:
@@ -84,6 +79,7 @@ Check the file again:
 <img src="https://sebastianraschka.com/images/github/mini-coding-agent/3.webp" width="300px">
 
 &nbsp;
+
 ## 5. Ask it to add unit tests
 
 Back in the REPL, paste:
@@ -97,6 +93,7 @@ Inspect the new test file:
 <img src="https://sebastianraschka.com/images/github/mini-coding-agent/4.webp" width="250px">
 
 &nbsp;
+
 ## 6. Ask it to run the tests
 
 Back in the REPL, paste:
@@ -112,6 +109,7 @@ uv run pytest tmp/binary-search-repo
 ```
 
 &nbsp;
+
 ## 7. Inspect the final repo state
 
 Check what changed:
@@ -129,6 +127,7 @@ You should now have:
 - `test_binary_search.py`
 
 &nbsp;
+
 ## 8. Useful interactive commands
 
 While the agent is running, these commands are available:
