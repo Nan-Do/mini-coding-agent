@@ -217,30 +217,10 @@ class LlamaCppModelClient:
             {"role": "user", "content": prompt},
         ]
 
-    def __init__(self, model, host, temperature, top_p, timeout):
-        self.model = model
-        self.host = host.rstrip("/")
-        self.temperature = temperature
-        self.top_p = top_p
-        self.timeout = timeout
-
-    def complete(self, system, prompt, max_new_tokens):
-        payload = {
-            "model": "not-needed",
-            "messages": self.__build_messages(system, prompt),
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "max_tokens": max_new_tokens,
-        }
-        request = urllib.request.Request(
-            self.host + "/v1/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
+    def __make_request(self, request):
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
+                return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise RuntimeError(
@@ -250,9 +230,52 @@ class LlamaCppModelClient:
             raise RuntimeError(
                 "Could not reach LlamaCpp.\n"
                 "Make sure `llama-server` is running.\n"
-                f"Host: {self.host}\n"
+                f"URL: {self.url}\n"
                 f"Model: {self.model}"
             ) from exc
+
+    def __check_model(self):
+        request = urllib.request.Request(
+            self.url + "/v1/models",
+            headers={"Content-Type": "application/json"},
+            method="GET",
+        )
+        data = self.__make_request(request)
+        if data.get("error"):
+            raise RuntimeError(f"Llama-server error: {data['error']}")
+
+        idx = 0
+        for t_idx, model in enumerate(data["models"]):
+            if model["name"] == self.model:
+                print("Found model")
+                idx = t_idx
+                break
+        self.model = data["models"][idx]["name"]
+        self.ctx = data["data"][idx]["meta"]["n_ctx"]
+
+    def __init__(self, model, host, port, temperature, top_p, timeout):
+        self.url = f"http://{host}:{port}"
+        self.temperature = temperature
+        self.top_p = top_p
+        self.timeout = timeout
+        self.model = model
+        self.__check_model()
+
+    def complete(self, system, prompt, max_new_tokens):
+        payload = {
+            "model": self.model,
+            "messages": self.__build_messages(system, prompt),
+            "temperature": self.temperature,
+            "top_p": self.top_p,
+            "max_tokens": max_new_tokens,
+        }
+        request = urllib.request.Request(
+            self.url + "/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        data = self.__make_request(request)
 
         if data.get("error"):
             raise RuntimeError(f"Llama-server error: {data['error']}")
@@ -969,7 +992,7 @@ class MiniAgent:
         return "delegate_result:\n" + child.ask(task)
 
 
-def build_welcome(agent, model, host):
+def build_welcome(agent, model, context, host):
     width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
     inner = width - 4
     gap = 3
@@ -1005,6 +1028,7 @@ def build_welcome(agent, model, host):
             row(""),
             row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
             pair("MODEL", model, "BRANCH", agent.workspace.branch),
+            pair("CONTEXT", context, "ENDPOINT", host),
             pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
             row(""),
         ]
@@ -1018,6 +1042,7 @@ def build_agent(args):
     model = LlamaCppModelClient(
         model=args.model,
         host=args.host,
+        port=args.port,
         temperature=args.temperature,
         top_p=args.top_p,
         timeout=args.llama_timeout,
@@ -1053,11 +1078,16 @@ def build_arg_parser():
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
     parser.add_argument(
-        "--model", default="qwen3.5:4b", help="Model name (not used right now)."
+        "--model",
+        default="Qwen3.5-4B-Q4_K_M.gguf",
+        help="Model name (if the suggested model doesn't exist it will use the one provided by llama-server).",
     )
     parser.add_argument(
-        "--host", default="http://127.0.0.1:8080", help="llama-server URL."
+        "--host", default="127.0.0.1", help="llama-server host address."
     )
+
+    parser.add_argument("--port", default=8080, help="llama-server port.")
+
     parser.add_argument(
         "--llama-timeout",
         type=int,
@@ -1104,7 +1134,14 @@ def main(argv=None):
     args = build_arg_parser().parse_args(argv)
     agent = build_agent(args)
 
-    print(build_welcome(agent, model=args.model, host=args.host))
+    print(
+        build_welcome(
+            agent,
+            model=agent.model_client.model,
+            context=agent.model_client.ctx,
+            host=args.host + f":{args.port}",
+        )
+    )
 
     if args.prompt:
         prompt = " ".join(args.prompt).strip()
