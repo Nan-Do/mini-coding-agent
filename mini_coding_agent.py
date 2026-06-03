@@ -211,11 +211,8 @@ class FakeModelClient:
 
 
 class LlamaCppModelClient:
-    def __build_messages(self, system, prompt):
-        return [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ]
+    def __build_messages(self, messages):
+        return [{"role": role, "content": content} for role, content in messages]
 
     def __make_request(self, request):
         try:
@@ -247,7 +244,7 @@ class LlamaCppModelClient:
         idx = 0
         for t_idx, model in enumerate(data["models"]):
             if model["name"] == self.model:
-                print("Found model")
+                # print("Found model")
                 idx = t_idx
                 break
         self.model = data["models"][idx]["name"]
@@ -262,9 +259,11 @@ class LlamaCppModelClient:
         self.__check_model()
 
     def complete(self, system, prompt, max_new_tokens):
+        messages = [("system", system), ("user", prompt)]
+
         payload = {
             "model": self.model,
-            "messages": self.__build_messages(system, prompt),
+            "messages": self.__build_messages(messages),
             "temperature": self.temperature,
             "top_p": self.top_p,
             "max_tokens": max_new_tokens,
@@ -275,11 +274,27 @@ class LlamaCppModelClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        data = self.__make_request(request)
 
-        if data.get("error"):
-            raise RuntimeError(f"Llama-server error: {data['error']}")
-        return data["choices"][0]["message"]["content"]
+        has_more_data = True
+        assistant_message = ""
+        while has_more_data:
+            data = self.__make_request(request)
+
+            assistant_message = data["choices"][0]["message"]["content"]
+            if data["choices"][0]["finish_reason"] != "length":
+                has_more_data = False
+            else:
+                payload["messages"] = self.__build_messages(
+                    messages + [("assistant", assistant_message)]
+                )
+                request = urllib.request.Request(
+                    self.url + "/v1/chat/completions",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+
+        return assistant_message
 
 
 class MiniAgent:
