@@ -1,300 +1,12 @@
-import argparse
 import json
 import re
 import shutil
 import subprocess
-import sys
-import urllib.error
-import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
-
-DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
-HELP_TEXT = "/help, /memory, /session, /reset, /exit"
-WELCOME_ART = (
-    "/\\     /\\\\",
-    "{  `---'  }",
-    "{  O   O  }",
-    "~~>  V  <~~",
-    "\\\\  \\|/  /",
-    "`-----'__",
-)
-HELP_DETAILS = "\n".join(
-    [
-        "Commands:",
-        "/help    Show this help message.",
-        "/memory  Show the agent's distilled working memory.",
-        "/session Show the path to the saved session file.",
-        "/reset   Clear the current session history and memory.",
-        "/exit    Exit the agent.",
-    ]
-)
-MAX_TOOL_OUTPUT = 4000
-MAX_HISTORY = 12000
-IGNORED_PATH_NAMES = {
-    ".git",
-    ".mini-coding-agent",
-    "__pycache__",
-    ".pytest_cache",
-    ".ruff_cache",
-    ".venv",
-    "venv",
-}
-
-##############################
-#### Six Agent Components ####
-##############################
-# 1) Live Repo Context -> WorkspaceContext
-# 2) Prompt Shape And Cache Reuse -> build_prefix, memory_text, prompt
-# 3) Structured Tools, Validation, And Permissions -> build_tools, run_tool, validate_tool, approve, parse, path, tool_*
-# 4) Context Reduction And Output Management -> clip, history_text
-# 5) Transcripts, Memory, And Resumption -> SessionStore, record, note_tool, ask, reset
-# 6) Delegation And Bounded Subagents -> tool_delegate
-
-
-def now():
-    return datetime.now(timezone.utc).isoformat()
-
-
-# Supporting helper for component 4 (context reduction and output management).
-def clip(text, limit=MAX_TOOL_OUTPUT):
-    text = str(text)
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
-
-
-def middle(text, limit):
-    text = str(text).replace("\n", " ")
-    if len(text) <= limit:
-        return text
-    if limit <= 3:
-        return text[:limit]
-    left = (limit - 3) // 2
-    right = limit - 3 - left
-    return text[:left] + "..." + text[-right:]
-
-
-##############################
-#### 1) Live Repo Context ####
-##############################
-class WorkspaceContext:
-    def __init__(
-        self,
-        cwd,
-        repo_root,
-        branch,
-        default_branch,
-        status,
-        recent_commits,
-        project_docs,
-    ):
-        self.cwd = cwd
-        self.repo_root = repo_root
-        self.branch = branch
-        self.default_branch = default_branch
-        self.status = status
-        self.recent_commits = recent_commits
-        self.project_docs = project_docs
-
-    @classmethod
-    def build(cls, cwd):
-        cwd = Path(cwd).resolve()
-
-        def git(args, fallback=""):
-            try:
-                result = subprocess.run(
-                    ["git", *args],
-                    cwd=cwd,
-                    capture_output=True,
-                    text=True,
-                    check=True,
-                    timeout=5,
-                )
-                return result.stdout.strip() or fallback
-            except Exception:
-                return fallback
-
-        repo_root = Path(git(["rev-parse", "--show-toplevel"], str(cwd))).resolve()
-        docs = {}
-        for base in (repo_root, cwd):
-            for name in DOC_NAMES:
-                path = base / name
-                if not path.exists():
-                    continue
-                key = str(path.relative_to(repo_root))
-                if key in docs:
-                    continue
-                docs[key] = clip(
-                    path.read_text(encoding="utf-8", errors="replace"), 1200
-                )
-
-        return cls(
-            cwd=str(cwd),
-            repo_root=str(repo_root),
-            branch=git(["branch", "--show-current"], "-") or "-",
-            default_branch=(
-                git(
-                    ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-                    "origin/main",
-                )
-                or "origin/main"
-            ).removeprefix("origin/"),
-            status=clip(git(["status", "--short"], "clean") or "clean", 1500),
-            recent_commits=[
-                line for line in git(["log", "--oneline", "-5"]).splitlines() if line
-            ],
-            project_docs=docs,
-        )
-
-    def text(self):
-        commits = "\n".join(f"- {line}" for line in self.recent_commits) or "- none"
-        docs = (
-            "\n".join(
-                f"- {path}\n{snippet}" for path, snippet in self.project_docs.items()
-            )
-            or "- none"
-        )
-        return "\n".join(
-            [
-                "Workspace:",
-                f"- cwd: {self.cwd}",
-                f"- repo_root: {self.repo_root}",
-                f"- branch: {self.branch}",
-                f"- default_branch: {self.default_branch}",
-                "- status:",
-                self.status,
-                "- recent_commits:",
-                commits,
-                "- project_docs:",
-                docs,
-            ]
-        )
-
-
-##############################
-#### 5) Session Memory #######
-##############################
-class SessionStore:
-    def __init__(self, root):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-
-    def path(self, session_id):
-        return self.root / f"{session_id}.json"
-
-    def save(self, session):
-        path = self.path(session["id"])
-        path.write_text(json.dumps(session, indent=2), encoding="utf-8")
-        return path
-
-    def load(self, session_id):
-        return json.loads(self.path(session_id).read_text(encoding="utf-8"))
-
-    def latest(self):
-        files = sorted(self.root.glob("*.json"), key=lambda path: path.stat().st_mtime)
-        return files[-1].stem if files else None
-
-
-class FakeModelClient:
-    def __init__(self, outputs):
-        self.outputs = list(outputs)
-        self.prompts = []
-
-    def complete(self, prompt, max_new_tokens):
-        self.prompts.append(prompt)
-        if not self.outputs:
-            raise RuntimeError("fake model ran out of outputs")
-        return self.outputs.pop(0)
-
-
-class LlamaCppModelClient:
-    def __build_messages(self, messages):
-        return [{"role": role, "content": content} for role, content in messages]
-
-    def __make_request(self, request):
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"LlamaCpp request failed with HTTP {exc.code}: {body}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise RuntimeError(
-                "Could not reach LlamaCpp.\n"
-                "Make sure `llama-server` is running.\n"
-                f"URL: {self.url}\n"
-                f"Model: {self.model}"
-            ) from exc
-
-    def __check_model(self):
-        request = urllib.request.Request(
-            self.url + "/v1/models",
-            headers={"Content-Type": "application/json"},
-            method="GET",
-        )
-        data = self.__make_request(request)
-        if data.get("error"):
-            raise RuntimeError(f"Llama-server error: {data['error']}")
-
-        idx = 0
-        for t_idx, model in enumerate(data["models"]):
-            if model["name"] == self.model:
-                # print("Found model")
-                idx = t_idx
-                break
-        self.model = data["models"][idx]["name"]
-        self.ctx = data["data"][idx]["meta"]["n_ctx"]
-
-    def __init__(self, model, host, port, temperature, top_p, timeout):
-        self.url = f"http://{host}:{port}"
-        self.temperature = temperature
-        self.top_p = top_p
-        self.timeout = timeout
-        self.model = model
-        self.__check_model()
-
-    def complete(self, system, prompt, max_new_tokens):
-        messages = [("system", system), ("user", prompt)]
-
-        payload = {
-            "model": self.model,
-            "messages": self.__build_messages(messages),
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "max_tokens": max_new_tokens,
-        }
-        request = urllib.request.Request(
-            self.url + "/v1/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
-        has_more_data = True
-        assistant_message = ""
-        while has_more_data:
-            data = self.__make_request(request)
-
-            assistant_message = data["choices"][0]["message"]["content"]
-            if data["choices"][0]["finish_reason"] != "length":
-                has_more_data = False
-            else:
-                payload["messages"] = self.__build_messages(
-                    messages + [("assistant", assistant_message)]
-                )
-                request = urllib.request.Request(
-                    self.url + "/v1/chat/completions",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-
-        return assistant_message
+from utils import MAX_HISTORY, IGNORED_PATH_NAMES, now, clip
 
 
 class MiniAgent:
@@ -351,9 +63,6 @@ class MiniAgent:
         bucket.append(item)
         del bucket[:-limit]
 
-    ###############################################
-    #### 3) Structured Tools And Permissions ######
-    ###############################################
     def build_tools(self):
         tools = {
             "list_files": {
@@ -402,9 +111,6 @@ class MiniAgent:
             }
         return tools
 
-    ############################################
-    #### 2) Prompt Shape And Cache Reuse #######
-    ############################################
     def build_prefix(self):
         tool_lines = []
         for name, tool in self.tools.items():
@@ -467,9 +173,6 @@ class MiniAgent:
             ]
         )
 
-    #####################################################
-    #### 4) Context Reduction And Output Management #####
-    #####################################################
     def history_text(self):
         history = self.session["history"]
         if not history:
@@ -501,9 +204,6 @@ class MiniAgent:
 
         return clip("\n".join(lines), MAX_HISTORY)
 
-    ########################################################
-    #### 2) Prompt Shape And Cache Reuse (Continued) #######
-    ########################################################
     def prompt(self, user_message):
         return self.prefix, "\n\n".join(
             [
@@ -513,9 +213,6 @@ class MiniAgent:
             ]
         )
 
-    ###############################################
-    #### 5) Session Memory (Continued) ###########
-    ###############################################
     def record(self, item):
         self.session["history"].append(item)
         self.session_path = self.session_store.save(self.session)
@@ -581,9 +278,6 @@ class MiniAgent:
         self.record({"role": "assistant", "content": final, "created_at": now()})
         return final
 
-    #############################################################
-    #### 3) Structured Tools, Validation, And Permissions #######
-    #############################################################
     def run_tool(self, name, args):
         tool = self.tools.get(name)
         if tool is None:
@@ -982,9 +676,6 @@ class MiniAgent:
         )
         return f"patched {path.relative_to(self.root)}"
 
-    ###################################################
-    #### 6) Delegation And Bounded Subagents ##########
-    ###################################################
     def tool_delegate(self, args):
         if self.depth >= self.max_depth:
             raise ValueError("delegate depth exceeded")
@@ -1005,201 +696,3 @@ class MiniAgent:
         child.session["memory"]["task"] = task
         child.session["memory"]["notes"] = [clip(self.history_text(), 300)]
         return "delegate_result:\n" + child.ask(task)
-
-
-def build_welcome(agent, model, context, host):
-    width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
-    inner = width - 4
-    gap = 3
-    left_width = (inner - gap) // 2
-    right_width = inner - gap - left_width
-
-    def row(text):
-        body = middle(text, width - 4)
-        return f"| {body.ljust(width - 4)} |"
-
-    def divider(char="-"):
-        return "+" + char * (width - 2) + "+"
-
-    def center(text):
-        body = middle(text, inner)
-        return f"| {body.center(inner)} |"
-
-    def cell(label, value, size):
-        body = middle(f"{label:<9} {value}", size)
-        return body.ljust(size)
-
-    def pair(left_label, left_value, right_label, right_value):
-        left = cell(left_label, left_value, left_width)
-        right = cell(right_label, right_value, right_width)
-        return f"| {left}{' ' * gap}{right} |"
-
-    line = divider("=")
-    rows = [center(text) for text in WELCOME_ART]
-    rows.extend(
-        [
-            center("MINI CODING AGENT"),
-            divider("-"),
-            row(""),
-            row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
-            pair("MODEL", model, "BRANCH", agent.workspace.branch),
-            pair("CONTEXT", context, "ENDPOINT", host),
-            pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
-            row(""),
-        ]
-    )
-    return "\n".join([line, *rows, line])
-
-
-def build_agent(args):
-    workspace = WorkspaceContext.build(args.cwd)
-    store = SessionStore(Path(workspace.repo_root) / ".mini-coding-agent" / "sessions")
-    model = LlamaCppModelClient(
-        model=args.model,
-        host=args.host,
-        port=args.port,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        timeout=args.llama_timeout,
-    )
-    session_id = args.resume
-    if session_id == "latest":
-        session_id = store.latest()
-    if session_id:
-        return MiniAgent.from_session(
-            model_client=model,
-            workspace=workspace,
-            session_store=store,
-            session_id=session_id,
-            approval_policy=args.approval,
-            max_steps=args.max_steps,
-            max_new_tokens=args.max_new_tokens,
-        )
-    return MiniAgent(
-        model_client=model,
-        workspace=workspace,
-        session_store=store,
-        approval_policy=args.approval,
-        max_steps=args.max_steps,
-        max_new_tokens=args.max_new_tokens,
-    )
-
-
-def build_arg_parser():
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-        description="Minimal coding agent for llama-server models.",
-    )
-    parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
-    parser.add_argument("--cwd", default=".", help="Workspace directory.")
-    parser.add_argument(
-        "--model",
-        default="Qwen3.5-4B-Q4_K_M.gguf",
-        help="Model name (if the suggested model doesn't exist it will use the one provided by llama-server).",
-    )
-    parser.add_argument(
-        "--host", default="127.0.0.1", help="llama-server host address."
-    )
-
-    parser.add_argument("--port", default=8080, help="llama-server port.")
-
-    parser.add_argument(
-        "--llama-timeout",
-        type=int,
-        default=300,
-        help="Llama request timeout in seconds.",
-    )
-    parser.add_argument(
-        "--resume", default=None, help="Session id to resume or 'latest'."
-    )
-    parser.add_argument(
-        "--approval",
-        choices=("ask", "auto", "never"),
-        default="ask",
-        help="Approval policy for risky tools; auto grants the model arbitrary command execution and file writes.",
-    )
-    parser.add_argument(
-        "--max-steps",
-        type=int,
-        default=6,
-        help="Maximum tool/model iterations per request.",
-    )
-    parser.add_argument(
-        "--max-new-tokens",
-        type=int,
-        default=512,
-        help="Maximum model output tokens per step.",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.2,
-        help="Sampling temperature sent to llama-server.",
-    )
-    parser.add_argument(
-        "--top-p",
-        type=float,
-        default=0.9,
-        help="Top-p sampling value sent to llama-server.",
-    )
-    return parser
-
-
-def main(argv=None):
-    args = build_arg_parser().parse_args(argv)
-    agent = build_agent(args)
-
-    print(
-        build_welcome(
-            agent,
-            model=agent.model_client.model,
-            context=agent.model_client.ctx,
-            host=args.host + f":{args.port}",
-        )
-    )
-
-    if args.prompt:
-        prompt = " ".join(args.prompt).strip()
-        if prompt:
-            print()
-            try:
-                print(agent.ask(prompt))
-            except RuntimeError as exc:
-                print(str(exc), file=sys.stderr)
-                return 1
-        return 0
-
-    while True:
-        try:
-            user_input = input("\nmini-coding-agent> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("")
-            return 0
-
-        if not user_input:
-            continue
-        if user_input in {"/exit", "/quit"}:
-            return 0
-        if user_input == "/help":
-            print(HELP_DETAILS)
-            continue
-        if user_input == "/memory":
-            print(agent.memory_text())
-            continue
-        if user_input == "/session":
-            print(agent.session_path)
-            continue
-        if user_input == "/reset":
-            agent.reset()
-            print("session reset")
-            continue
-
-        print()
-        try:
-            print(agent.ask(user_input))
-        except RuntimeError as exc:
-            print(str(exc), file=sys.stderr)
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
