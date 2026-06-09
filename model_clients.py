@@ -2,11 +2,11 @@ import json
 import urllib.error
 import urllib.request
 
-from typing import Dict, List, Self, Tuple
+from typing import Dict, List, Self, Sequence, Tuple
 
 
 class FakeModelClient:
-    def __init__(self, outputs: str):
+    def __init__(self, outputs: Sequence):
         self.outputs = list(outputs)
         self.prompts = []
 
