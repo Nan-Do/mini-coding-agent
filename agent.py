@@ -6,23 +6,31 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from collections.abc import Callable
+from model_clients import LlamaCppModelClient
 from utils import MAX_HISTORY, IGNORED_PATH_NAMES, now, clip
+from session import SessionStore
+from typing import Dict, List, Self, Tuple, TypeAlias
+from workspace import WorkspaceContext
+
+# Custom types:
+Tools: TypeAlias = Dict[str, Dict[str, str | bool | Callable[..., None]]]
 
 
 class MiniAgent:
     def __init__(
-        self,
-        model_client,
-        workspace,
-        session_store,
+        self: Self,
+        model_client: LlamaCppModelClient,
+        workspace: WorkspaceContext,
+        session_store: SessionStore,
         session=None,
-        approval_policy="ask",
-        max_steps=6,
-        max_new_tokens=512,
-        depth=0,
-        max_depth=1,
-        read_only=False,
-    ):
+        approval_policy: str = "ask",
+        max_steps: int = 6,
+        max_new_tokens: int = 512,
+        depth: int = 0,
+        max_depth: int = 1,
+        read_only: bool = False,
+    ) -> None:
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
@@ -45,7 +53,14 @@ class MiniAgent:
         self.session_path = self.session_store.save(self.session)
 
     @classmethod
-    def from_session(cls, model_client, workspace, session_store, session_id, **kwargs):
+    def from_session(
+        cls: type[Self],
+        model_client: LlamaCppModelClient,
+        workspace: WorkspaceContext,
+        session_store: SessionStore,
+        session_id: str,
+        **kwargs,
+    ) -> Self:
         return cls(
             model_client=model_client,
             workspace=workspace,
@@ -55,7 +70,7 @@ class MiniAgent:
         )
 
     @staticmethod
-    def remember(bucket, item, limit):
+    def remember(bucket: List[str], item: str, limit: int) -> None:
         if not item:
             return
         if item in bucket:
@@ -63,7 +78,9 @@ class MiniAgent:
         bucket.append(item)
         del bucket[:-limit]
 
-    def build_tools(self):
+    def build_tools(
+        self: Self,
+    ) -> Tools:
         tools = {
             "list_files": {
                 "schema": {"path": "str='.'"},
@@ -111,7 +128,7 @@ class MiniAgent:
             }
         return tools
 
-    def build_prefix(self):
+    def build_prefix(self: Self) -> str:
         tool_lines = []
         for name, tool in self.tools.items():
             fields = ", ".join(
@@ -160,7 +177,7 @@ class MiniAgent:
             ]
         )
 
-    def memory_text(self):
+    def memory_text(self: Self) -> str:
         memory = self.session["memory"]
         notes = "\n".join(f"- {note}" for note in memory["notes"]) or "- none"
         return "\n".join(
@@ -173,7 +190,7 @@ class MiniAgent:
             ]
         )
 
-    def history_text(self):
+    def history_text(self: Self) -> str:
         history = self.session["history"]
         if not history:
             return "- empty"
@@ -204,7 +221,7 @@ class MiniAgent:
 
         return clip("\n".join(lines), MAX_HISTORY)
 
-    def prompt(self, user_message):
+    def prompt(self: Self, user_message: str) -> Tuple[str, str]:
         return self.prefix, "\n\n".join(
             [
                 self.memory_text(),
@@ -213,11 +230,11 @@ class MiniAgent:
             ]
         )
 
-    def record(self, item):
+    def record(self: Self, item: Dict[str, str]) -> None:
         self.session["history"].append(item)
         self.session_path = self.session_store.save(self.session)
 
-    def note_tool(self, name, args, result):
+    def note_tool(self: Self, name: str, args: Dict[str, str], result: str) -> None:
         memory = self.session["memory"]
         path = args.get("path")
         if name in {"read_file", "write_file", "patch_file"} and path:
@@ -225,7 +242,7 @@ class MiniAgent:
         note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
         self.remember(memory["notes"], note, 5)
 
-    def ask(self, user_message):
+    def ask(self: Self, user_message: str) -> str:
         memory = self.session["memory"]
         if not memory["task"]:
             memory["task"] = clip(user_message.strip(), 300)
@@ -278,7 +295,7 @@ class MiniAgent:
         self.record({"role": "assistant", "content": final, "created_at": now()})
         return final
 
-    def run_tool(self, name, args):
+    def run_tool(self: Self, name: str, args: Dict[str, str]) -> str:
         tool = self.tools.get(name)
         if tool is None:
             return f"error: unknown tool '{name}'"
@@ -299,7 +316,7 @@ class MiniAgent:
         except Exception as exc:
             return f"error: tool {name} failed: {exc}"
 
-    def repeated_tool_call(self, name, args):
+    def repeated_tool_call(self: Self, name: str, args: Dict[str, str]) -> bool:
         tool_events = [
             item for item in self.session["history"] if item["role"] == "tool"
         ]
@@ -308,7 +325,7 @@ class MiniAgent:
         recent = tool_events[-2:]
         return all(item["name"] == name and item["args"] == args for item in recent)
 
-    def tool_example(self, name):
+    def tool_example(self: Self, name: str) -> str:
         examples = {
             "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
             "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
@@ -320,7 +337,7 @@ class MiniAgent:
         }
         return examples.get(name, "")
 
-    def validate_tool(self, name, args):
+    def validate_tool(self: Self, name: str, args: Dict[str, str]):
         args = args or {}
 
         if name == "list_files":
@@ -386,7 +403,7 @@ class MiniAgent:
                 raise ValueError("task must not be empty")
             return
 
-    def approve(self, name, args):
+    def approve(self: Self, name: str, args: Dict[str, str]) -> bool:
         if self.read_only:
             return False
         if self.approval_policy == "auto":
@@ -402,7 +419,7 @@ class MiniAgent:
         return answer.strip().lower() in {"y", "yes"}
 
     @staticmethod
-    def parse(raw):
+    def parse(raw: str) -> Tuple[str, str | Dict[str, str]]:
         raw = str(raw)
         if "<tool>" in raw and (
             "<final>" not in raw or raw.find("<tool>") < raw.find("<final>")
@@ -448,7 +465,7 @@ class MiniAgent:
         return "retry", MiniAgent.retry_notice("model returned an empty response")
 
     @staticmethod
-    def retry_notice(problem=None):
+    def retry_notice(problem: str | None = None) -> str:
         prefix = "Runtime notice"
         if problem:
             prefix += f": {problem}"
@@ -460,7 +477,7 @@ class MiniAgent:
         )
 
     @staticmethod
-    def parse_xml_tool(raw):
+    def parse_xml_tool(raw: str) -> Dict[str, str | Dict[str, str]] | None:
         match = re.search(r"<tool(?P<attrs>[^>]*)>(?P<body>.*?)</tool>", raw, re.S)
         if not match:
             return None
@@ -491,7 +508,7 @@ class MiniAgent:
         return {"name": name, "args": args}
 
     @staticmethod
-    def parse_attrs(text):
+    def parse_attrs(text: str) -> Dict[str, str]:
         attrs = {}
         for match in re.finditer(
             r"""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", text
@@ -502,7 +519,7 @@ class MiniAgent:
         return attrs
 
     @staticmethod
-    def extract(text, tag):
+    def extract(text: str, tag: str) -> str:
         start_tag = f"<{tag}>"
         end_tag = f"</{tag}>"
         start = text.find(start_tag)
@@ -515,7 +532,7 @@ class MiniAgent:
         return text[start:end].strip()
 
     @staticmethod
-    def extract_raw(text, tag):
+    def extract_raw(text: str, tag: str) -> str:
         start_tag = f"<{tag}>"
         end_tag = f"</{tag}>"
         start = text.find(start_tag)
@@ -527,12 +544,12 @@ class MiniAgent:
             return text[start:]
         return text[start:end]
 
-    def reset(self):
+    def reset(self: Self) -> None:
         self.session["history"] = []
         self.session["memory"] = {"task": "", "files": [], "notes": []}
         self.session_store.save(self.session)
 
-    def path_is_within_root(self, resolved):
+    def path_is_within_root(self: Self, resolved: Path) -> bool:
         probe = resolved
         while not probe.exists() and probe.parent != probe:
             probe = probe.parent
@@ -544,7 +561,7 @@ class MiniAgent:
                 continue
         return False
 
-    def path(self, raw_path):
+    def path(self: Self, raw_path: str) -> Path:
         path = Path(raw_path)
         path = path if path.is_absolute() else self.root / path
         resolved = path.resolve()
@@ -552,7 +569,7 @@ class MiniAgent:
             raise ValueError(f"path escapes workspace: {raw_path}")
         return resolved
 
-    def tool_list_files(self, args):
+    def tool_list_files(self: Self, args: Dict[str, str]) -> str:
         path = self.path(args.get("path", "."))
         if not path.is_dir():
             raise ValueError("path is not a directory")
@@ -569,7 +586,7 @@ class MiniAgent:
             lines.append(f"{kind} {entry.relative_to(self.root)}")
         return "\n".join(lines) or "(empty)"
 
-    def tool_read_file(self, args):
+    def tool_read_file(self: Self, args: Dict[str, str]) -> str:
         path = self.path(args["path"])
         if not path.is_file():
             raise ValueError("path is not a file")
@@ -584,7 +601,7 @@ class MiniAgent:
         )
         return f"# {path.relative_to(self.root)}\n{body}"
 
-    def tool_search(self, args):
+    def tool_search(self: Self, args: Dict[str, str]) -> str:
         pattern = str(args.get("pattern", "")).strip()
         if not pattern:
             raise ValueError("pattern must not be empty")
@@ -626,7 +643,7 @@ class MiniAgent:
                         return "\n".join(matches)
         return "\n".join(matches) or "(no matches)"
 
-    def tool_run_shell(self, args):
+    def tool_run_shell(self: Self, args: Dict[str, str]) -> str:
         command = str(args.get("command", "")).strip()
         if not command:
             raise ValueError("command must not be empty")
@@ -651,14 +668,14 @@ class MiniAgent:
             ]
         )
 
-    def tool_write_file(self, args):
+    def tool_write_file(self: Self, args: Dict[str, str]) -> str:
         path = self.path(args["path"])
         content = str(args["content"])
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         return f"wrote {path.relative_to(self.root)} ({len(content)} chars)"
 
-    def tool_patch_file(self, args):
+    def tool_patch_file(self: Self, args: Dict[str, str]) -> str:
         path = self.path(args["path"])
         if not path.is_file():
             raise ValueError("path is not a file")
@@ -676,7 +693,7 @@ class MiniAgent:
         )
         return f"patched {path.relative_to(self.root)}"
 
-    def tool_delegate(self, args):
+    def tool_delegate(self: Self, args: Dict[str, str]) -> str:
         if self.depth >= self.max_depth:
             raise ValueError("delegate depth exceeded")
         task = str(args.get("task", "")).strip()
