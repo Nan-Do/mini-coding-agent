@@ -6,15 +6,20 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from collections.abc import Callable
 from model_clients import LlamaCppModelClient
-from utils import MAX_HISTORY, IGNORED_PATH_NAMES, now, clip
 from session import SessionStore
-from typing import Dict, List, Self, Tuple, TypeAlias
+from typing import Dict, List, Self, Tuple
 from workspace import WorkspaceContext
-
-# Custom types:
-Tools: TypeAlias = Dict[str, Dict[str, str | bool | Callable[..., None]]]
+from utils import (
+    MAX_HISTORY,
+    IGNORED_PATH_NAMES,
+    now,
+    clip,
+    HistoryDict,
+    MemoryDict,
+    SessionDict,
+    Tools,
+)
 
 
 class MiniAgent:
@@ -23,7 +28,7 @@ class MiniAgent:
         model_client: LlamaCppModelClient,
         workspace: WorkspaceContext,
         session_store: SessionStore,
-        session=None,
+        session: SessionDict | None = None,
         approval_policy: str = "ask",
         max_steps: int = 6,
         max_new_tokens: int = 512,
@@ -178,7 +183,7 @@ class MiniAgent:
         )
 
     def memory_text(self: Self) -> str:
-        memory = self.session["memory"]
+        memory: MemoryDict = self.session["memory"]
         notes = "\n".join(f"- {note}" for note in memory["notes"]) or "- none"
         return "\n".join(
             [
@@ -191,7 +196,7 @@ class MiniAgent:
         )
 
     def history_text(self: Self) -> str:
-        history = self.session["history"]
+        history: HistoryDict = self.session["history"]
         if not history:
             return "- empty"
 
