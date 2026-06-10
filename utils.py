@@ -34,18 +34,18 @@ IGNORED_PATH_NAMES = {
 }
 
 
-def now():
+def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def clip(text, limit=MAX_TOOL_OUTPUT):
+def clip(text: str, limit: int = MAX_TOOL_OUTPUT) -> str:
     text = str(text)
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
 
 
-def middle(text, limit):
+def middle(text: str, limit: int) -> str:
     text = str(text).replace("\n", " ")
     if len(text) <= limit:
         return text

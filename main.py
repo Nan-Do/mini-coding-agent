@@ -10,29 +10,31 @@ from utils import HELP_DETAILS, WELCOME_ART, middle
 from workspace import WorkspaceContext
 
 
-def build_welcome(agent, model, context, host):
+def build_welcome(agent: MiniAgent, model: str, context: int, host: str) -> str:
     width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
     inner = width - 4
     gap = 3
     left_width = (inner - gap) // 2
     right_width = inner - gap - left_width
 
-    def row(text):
+    def row(text: str) -> str:
         body = middle(text, width - 4)
         return f"| {body.ljust(width - 4)} |"
 
-    def divider(char="-"):
+    def divider(char: str = "-") -> str:
         return "+" + char * (width - 2) + "+"
 
-    def center(text):
+    def center(text: str) -> str:
         body = middle(text, inner)
         return f"| {body.center(inner)} |"
 
-    def cell(label, value, size):
+    def cell(label: str, value: str, size: int) -> str:
         body = middle(f"{label:<9} {value}", size)
         return body.ljust(size)
 
-    def pair(left_label, left_value, right_label, right_value):
+    def pair(
+        left_label: str, left_value: str, right_label: str, right_value: str
+    ) -> str:
         left = cell(left_label, left_value, left_width)
         right = cell(right_label, right_value, right_width)
         return f"| {left}{' ' * gap}{right} |"
@@ -46,7 +48,7 @@ def build_welcome(agent, model, context, host):
             row(""),
             row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
             pair("MODEL", model, "BRANCH", agent.workspace.branch),
-            pair("CONTEXT", context, "ENDPOINT", host),
+            pair("CONTEXT", str(context), "ENDPOINT", host),
             pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
             row(""),
         ]
@@ -54,7 +56,7 @@ def build_welcome(agent, model, context, host):
     return "\n".join([line, *rows, line])
 
 
-def build_agent(args):
+def build_agent(args: argparse.Namespace) -> MiniAgent:
     workspace = WorkspaceContext.build(args.cwd)
     store = SessionStore(Path(workspace.repo_root) / ".mini-coding-agent" / "sessions")
     model = LlamaCppModelClient(
@@ -88,7 +90,7 @@ def build_agent(args):
     )
 
 
-def build_arg_parser():
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
         description="Minimal coding agent for llama-server models.",
@@ -146,8 +148,8 @@ def build_arg_parser():
     return parser
 
 
-def main(argv=None):
-    args = build_arg_parser().parse_args(argv)
+def main() -> int:
+    args = build_arg_parser().parse_args()
     agent = build_agent(args)
 
     print(
