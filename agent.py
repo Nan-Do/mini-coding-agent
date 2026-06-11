@@ -1,26 +1,23 @@
 import json
 import re
-import shutil
-import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
 
 from model_clients import LlamaCppModelClient
 from session import SessionStore
+from tools import ToolRegistry
 from typing import Dict, List, Self, Tuple
 from workspace import WorkspaceContext
 from utils import (
     MAX_HISTORY,
-    IGNORED_PATH_NAMES,
     now,
     clip,
     HistoryEntry,
-    MessageEntry,
     Memory,
+    MessageEntry,
     Session,
     ToolEntry,
-    Tools,
 )
 
 
@@ -55,7 +52,16 @@ class MiniAgent:
             history=[],
             memory=Memory(task="", files=[], notes=[]),
         )
-        self.tools = self.build_tools()
+        self.tools = ToolRegistry(
+            workspace=self.workspace,
+            root=self.root,
+            approval_policy=self.approval_policy,
+            read_only=self.read_only,
+            depth=self.depth,
+            max_depth=self.max_depth,
+            get_history=lambda: self.session.history,
+            delegate_fn=self._make_delegate if self.depth < self.max_depth else None,
+        )
         self.prefix = self.build_prefix()
         self.session_path = self.session_store.save(self.session)
 
@@ -85,55 +91,21 @@ class MiniAgent:
         bucket.append(item)
         del bucket[:-limit]
 
-    def build_tools(
-        self: Self,
-    ) -> Tools:
-        tools = {
-            "list_files": {
-                "schema": {"path": "str='.'"},
-                "risky": False,
-                "description": "List files in the workspace.",
-                "run": self.tool_list_files,
-            },
-            "read_file": {
-                "schema": {"path": "str", "start": "int=1", "end": "int=200"},
-                "risky": False,
-                "description": "Read a UTF-8 file by line range.",
-                "run": self.tool_read_file,
-            },
-            "search": {
-                "schema": {"pattern": "str", "path": "str='.'"},
-                "risky": False,
-                "description": "Search the workspace with rg or a simple fallback.",
-                "run": self.tool_search,
-            },
-            "run_shell": {
-                "schema": {"command": "str", "timeout": "int=20"},
-                "risky": True,
-                "description": "Run a shell command in the repo root.",
-                "run": self.tool_run_shell,
-            },
-            "write_file": {
-                "schema": {"path": "str", "content": "str"},
-                "risky": True,
-                "description": "Write a text file.",
-                "run": self.tool_write_file,
-            },
-            "patch_file": {
-                "schema": {"path": "str", "old_text": "str", "new_text": "str"},
-                "risky": True,
-                "description": "Replace one exact text block in a file.",
-                "run": self.tool_patch_file,
-            },
-        }
-        if self.depth < self.max_depth:
-            tools["delegate"] = {
-                "schema": {"task": "str", "max_steps": "int=3"},
-                "risky": False,
-                "description": "Ask a bounded read-only child agent to investigate.",
-                "run": self.tool_delegate,
-            }
-        return tools
+    def _make_delegate(self: Self, task: str, max_steps: int) -> str:
+        child = MiniAgent(
+            model_client=self.model_client,
+            workspace=self.workspace,
+            session_store=self.session_store,
+            approval_policy="never",
+            max_steps=max_steps,
+            max_new_tokens=self.max_new_tokens,
+            depth=self.depth + 1,
+            max_depth=self.max_depth,
+            read_only=True,
+        )
+        child.session.memory.task = task
+        child.session.memory.notes = [clip(self.history_text(), 300)]
+        return "delegate_result:\n" + child.ask(task)
 
     def build_prefix(self: Self) -> str:
         tool_lines = []
@@ -207,10 +179,7 @@ class MiniAgent:
         recent_start = max(0, len(history) - 6)
         for index, item in enumerate(history):
             recent = index >= recent_start
-            if isinstance(item, ToolEntry) and item.name in (
-                "write_file",
-                "patch_file",
-            ):
+            if isinstance(item, ToolEntry) and item.name in ("write_file", "patch_file"):
                 path = str(item.args.get("path", ""))
                 seen_reads.discard(path)
             if isinstance(item, ToolEntry) and item.name == "read_file" and not recent:
@@ -274,7 +243,7 @@ class MiniAgent:
                 tool_steps += 1
                 name = payload.get("name", "")
                 args = payload.get("args", {})
-                result = self.run_tool(name, args)
+                result = self.tools.run(name, args)
                 self.record(
                     ToolEntry(
                         role="tool",
@@ -304,129 +273,6 @@ class MiniAgent:
             final = "Stopped after reaching the step limit without a final answer."
         self.record(MessageEntry(role="assistant", content=final, created_at=now()))
         return final
-
-    def run_tool(self: Self, name: str, args: Dict[str, str]) -> str:
-        tool = self.tools.get(name)
-        if tool is None:
-            return f"error: unknown tool '{name}'"
-        try:
-            self.validate_tool(name, args)
-        except Exception as exc:
-            example = self.tool_example(name)
-            message = f"error: invalid arguments for {name}: {exc}"
-            if example:
-                message += f"\nexample: {example}"
-            return message
-        if self.repeated_tool_call(name, args):
-            return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
-        if tool["risky"] and not self.approve(name, args):
-            return f"error: approval denied for {name}"
-        try:
-            return clip(tool["run"](args))
-        except Exception as exc:
-            return f"error: tool {name} failed: {exc}"
-
-    def repeated_tool_call(self: Self, name: str, args: Dict[str, str]) -> bool:
-        tool_events = [
-            item for item in self.session.history if isinstance(item, ToolEntry)
-        ]
-        if len(tool_events) < 2:
-            return False
-        recent = tool_events[-2:]
-        return all(item.name == name and item.args == args for item in recent)
-
-    def tool_example(self: Self, name: str) -> str:
-        examples = {
-            "list_files": '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-            "read_file": '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-            "search": '<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
-            "run_shell": '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-            "write_file": '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-            "patch_file": '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-            "delegate": '<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
-        }
-        return examples.get(name, "")
-
-    def validate_tool(self: Self, name: str, args: Dict[str, str]):
-        args = args or {}
-
-        if name == "list_files":
-            path = self.path(args.get("path", "."))
-            if not path.is_dir():
-                raise ValueError("path is not a directory")
-            return
-
-        if name == "read_file":
-            path = self.path(args["path"])
-            if not path.is_file():
-                raise ValueError("path is not a file")
-            start = int(args.get("start", 1))
-            end = int(args.get("end", 200))
-            if start < 1 or end < start:
-                raise ValueError("invalid line range")
-            return
-
-        if name == "search":
-            pattern = str(args.get("pattern", "")).strip()
-            if not pattern:
-                raise ValueError("pattern must not be empty")
-            self.path(args.get("path", "."))
-            return
-
-        if name == "run_shell":
-            command = str(args.get("command", "")).strip()
-            if not command:
-                raise ValueError("command must not be empty")
-            timeout = int(args.get("timeout", 20))
-            if timeout < 1 or timeout > 120:
-                raise ValueError("timeout must be in [1, 120]")
-            return
-
-        if name == "write_file":
-            path = self.path(args["path"])
-            if path.exists() and path.is_dir():
-                raise ValueError("path is a directory")
-            if "content" not in args:
-                raise ValueError("missing content")
-            return
-
-        if name == "patch_file":
-            path = self.path(args["path"])
-            if not path.is_file():
-                raise ValueError("path is not a file")
-            old_text = str(args.get("old_text", ""))
-            if not old_text:
-                raise ValueError("old_text must not be empty")
-            if "new_text" not in args:
-                raise ValueError("missing new_text")
-            text = path.read_text(encoding="utf-8")
-            count = text.count(old_text)
-            if count != 1:
-                raise ValueError(f"old_text must occur exactly once, found {count}")
-            return
-
-        if name == "delegate":
-            if self.depth >= self.max_depth:
-                raise ValueError("delegate depth exceeded")
-            task = str(args.get("task", "")).strip()
-            if not task:
-                raise ValueError("task must not be empty")
-            return
-
-    def approve(self: Self, name: str, args: Dict[str, str]) -> bool:
-        if self.read_only:
-            return False
-        if self.approval_policy == "auto":
-            return True
-        if self.approval_policy == "never":
-            return False
-        try:
-            answer = input(
-                f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] "
-            )
-        except EOFError:
-            return False
-        return answer.strip().lower() in {"y", "yes"}
 
     @staticmethod
     def parse(raw: str) -> Tuple[str, str | Dict[str, str]]:
@@ -556,170 +402,5 @@ class MiniAgent:
 
     def reset(self: Self) -> None:
         self.session.history = []
-        self.session.memory = MemoryDictl(task="", files=[], notes=[])
+        self.session.memory = Memory(task="", files=[], notes=[])
         self.session_store.save(self.session)
-
-    def path_is_within_root(self: Self, resolved: Path) -> bool:
-        probe = resolved
-        while not probe.exists() and probe.parent != probe:
-            probe = probe.parent
-        for candidate in (probe, *probe.parents):
-            try:
-                if candidate.samefile(self.root):
-                    return True
-            except OSError:
-                continue
-        return False
-
-    def path(self: Self, raw_path: str) -> Path:
-        path = Path(raw_path)
-        path = path if path.is_absolute() else self.root / path
-        resolved = path.resolve()
-        if not self.path_is_within_root(resolved):
-            raise ValueError(f"path escapes workspace: {raw_path}")
-        return resolved
-
-    def tool_list_files(self: Self, args: Dict[str, str]) -> str:
-        path = self.path(args.get("path", "."))
-        if not path.is_dir():
-            raise ValueError("path is not a directory")
-        entries = [
-            item
-            for item in sorted(
-                path.iterdir(), key=lambda item: (item.is_file(), item.name.lower())
-            )
-            if item.name not in IGNORED_PATH_NAMES
-        ]
-        lines = []
-        for entry in entries[:200]:
-            kind = "[D]" if entry.is_dir() else "[F]"
-            lines.append(f"{kind} {entry.relative_to(self.root)}")
-        return "\n".join(lines) or "(empty)"
-
-    def tool_read_file(self: Self, args: Dict[str, str]) -> str:
-        path = self.path(args["path"])
-        if not path.is_file():
-            raise ValueError("path is not a file")
-        start = int(args.get("start", 1))
-        end = int(args.get("end", 200))
-        if start < 1 or end < start:
-            raise ValueError("invalid line range")
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        body = "\n".join(
-            f"{number:>4}: {line}"
-            for number, line in enumerate(lines[start - 1 : end], start=start)
-        )
-        return f"# {path.relative_to(self.root)}\n{body}"
-
-    def tool_search(self: Self, args: Dict[str, str]) -> str:
-        pattern = str(args.get("pattern", "")).strip()
-        if not pattern:
-            raise ValueError("pattern must not be empty")
-        path = self.path(args.get("path", "."))
-
-        if shutil.which("rg"):
-            result = subprocess.run(
-                ["rg", "-n", "--smart-case", "--max-count", "200", pattern, str(path)],
-                cwd=self.root,
-                capture_output=True,
-                text=True,
-            )
-            return result.stdout.strip() or result.stderr.strip() or "(no matches)"
-
-        matches = []
-        files = (
-            [path]
-            if path.is_file()
-            else [
-                item
-                for item in path.rglob("*")
-                if item.is_file()
-                and not any(
-                    part in IGNORED_PATH_NAMES
-                    for part in item.relative_to(self.root).parts
-                )
-            ]
-        )
-        for file_path in files:
-            for number, line in enumerate(
-                file_path.read_text(encoding="utf-8", errors="replace").splitlines(),
-                start=1,
-            ):
-                if pattern.lower() in line.lower():
-                    matches.append(
-                        f"{file_path.relative_to(self.root)}:{number}:{line}"
-                    )
-                    if len(matches) >= 200:
-                        return "\n".join(matches)
-        return "\n".join(matches) or "(no matches)"
-
-    def tool_run_shell(self: Self, args: Dict[str, str]) -> str:
-        command = str(args.get("command", "")).strip()
-        if not command:
-            raise ValueError("command must not be empty")
-        timeout = int(args.get("timeout", 20))
-        if timeout < 1 or timeout > 120:
-            raise ValueError("timeout must be in [1, 120]")
-        result = subprocess.run(
-            command,
-            cwd=self.root,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-        return "\n".join(
-            [
-                f"exit_code: {result.returncode}",
-                "stdout:",
-                result.stdout.strip() or "(empty)",
-                "stderr:",
-                result.stderr.strip() or "(empty)",
-            ]
-        )
-
-    def tool_write_file(self: Self, args: Dict[str, str]) -> str:
-        path = self.path(args["path"])
-        content = str(args["content"])
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        return f"wrote {path.relative_to(self.root)} ({len(content)} chars)"
-
-    def tool_patch_file(self: Self, args: Dict[str, str]) -> str:
-        path = self.path(args["path"])
-        if not path.is_file():
-            raise ValueError("path is not a file")
-        old_text = str(args.get("old_text", ""))
-        if not old_text:
-            raise ValueError("old_text must not be empty")
-        if "new_text" not in args:
-            raise ValueError("missing new_text")
-        text = path.read_text(encoding="utf-8")
-        count = text.count(old_text)
-        if count != 1:
-            raise ValueError(f"old_text must occur exactly once, found {count}")
-        path.write_text(
-            text.replace(old_text, str(args["new_text"]), 1), encoding="utf-8"
-        )
-        return f"patched {path.relative_to(self.root)}"
-
-    def tool_delegate(self: Self, args: Dict[str, str]) -> str:
-        if self.depth >= self.max_depth:
-            raise ValueError("delegate depth exceeded")
-        task = str(args.get("task", "")).strip()
-        if not task:
-            raise ValueError("task must not be empty")
-        child = MiniAgent(
-            model_client=self.model_client,
-            workspace=self.workspace,
-            session_store=self.session_store,
-            approval_policy="never",
-            max_steps=int(args.get("max_steps", 3)),
-            max_new_tokens=self.max_new_tokens,
-            depth=self.depth + 1,
-            max_depth=self.max_depth,
-            read_only=True,
-        )
-        child.session.memory.task = task
-        child.session.memory.notes = [clip(self.history_text(), 300)]
-        return "delegate_result:\n" + child.ask(task)
