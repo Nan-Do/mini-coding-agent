@@ -63,10 +63,10 @@ class ToolEntry:
     created_at: datetime
 
 
-History: TypeAlias = Union[MessageEntry, ToolEntry]
+HistoryEntry: TypeAlias = Union[MessageEntry, ToolEntry]
 
 
-def history_entry_from_dict(d: Dict[str, Any]) -> History:
+def history_entry_from_dict(d: Dict[str, Any]) -> HistoryEntry:
     if d.get("role") == "tool":
         return ToolEntry(**d)
     return MessageEntry(**d)
@@ -77,7 +77,7 @@ class Session:
     id: str
     created_at: str
     workspace_root: str
-    history: List[History]
+    history: List[HistoryEntry]
     memory: Memory
 
 

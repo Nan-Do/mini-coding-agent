@@ -15,7 +15,7 @@ from utils import (
     IGNORED_PATH_NAMES,
     now,
     clip,
-    History,
+    HistoryEntry,
     MessageEntry,
     Memory,
     Session,
@@ -198,7 +198,7 @@ class MiniAgent:
         )
 
     def history_text(self: Self) -> str:
-        history: List[History] = self.session.history
+        history: List[HistoryEntry] = self.session.history
         if not history:
             return "- empty"
 
@@ -240,7 +240,7 @@ class MiniAgent:
             ]
         )
 
-    def record(self: Self, item: History) -> None:
+    def record(self: Self, item: HistoryEntry) -> None:
         self.session.history.append(item)
         self.session_path = self.session_store.save(self.session)
 
