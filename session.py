@@ -1,6 +1,7 @@
+import dataclasses
 import json
 from pathlib import Path
-from utils import SessionDict
+from utils import Session, history_entry_from_dict
 
 
 class SessionStore:
@@ -11,13 +12,23 @@ class SessionStore:
     def path(self, session_id: str) -> Path:
         return self.root / f"{session_id}.json"
 
-    def save(self, session: SessionDict) -> Path:
-        path = self.path(session["id"])
-        path.write_text(json.dumps(session, indent=2), encoding="utf-8")
+    def save(self, session: Session) -> Path:
+        path = self.path(session.id)
+        serializable = {
+            **dataclasses.asdict(session),
+            "history": [
+                dataclasses.asdict(item) if dataclasses.is_dataclass(item) else item
+                for item in session.history
+            ],
+            "memory": dataclasses.asdict(session.memory),
+        }
+        path.write_text(json.dumps(serializable, indent=2), encoding="utf-8")
         return path
 
-    def load(self, session_id: str) -> SessionDict:
-        return json.loads(self.path(session_id).read_text(encoding="utf-8"))
+    def load(self, session_id: str) -> Session:
+        data = json.loads(self.path(session_id).read_text(encoding="utf-8"))
+        data["history"] = [history_entry_from_dict(item) for item in data["history"]]
+        return data
 
     def latest(self) -> str | None:
         files = sorted(self.root.glob("*.json"), key=lambda path: path.stat().st_mtime)

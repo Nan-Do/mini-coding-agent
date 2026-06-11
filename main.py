@@ -49,7 +49,7 @@ def build_welcome(agent: MiniAgent, model: str, context: int, host: str) -> str:
             row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
             pair("MODEL", model, "BRANCH", agent.workspace.branch),
             pair("CONTEXT", str(context), "ENDPOINT", host),
-            pair("APPROVAL", agent.approval_policy, "SESSION", agent.session["id"]),
+            pair("APPROVAL", agent.approval_policy, "SESSION", agent.session.id),
             row(""),
         ]
     )

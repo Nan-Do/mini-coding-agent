@@ -15,9 +15,11 @@ from utils import (
     IGNORED_PATH_NAMES,
     now,
     clip,
-    HistoryDict,
-    MemoryDict,
-    SessionDict,
+    History,
+    MessageEntry,
+    Memory,
+    Session,
+    ToolEntry,
     Tools,
 )
 
@@ -28,7 +30,7 @@ class MiniAgent:
         model_client: LlamaCppModelClient,
         workspace: WorkspaceContext,
         session_store: SessionStore,
-        session: SessionDict | None = None,
+        session: Session | None = None,
         approval_policy: str = "ask",
         max_steps: int = 6,
         max_new_tokens: int = 512,
@@ -46,13 +48,13 @@ class MiniAgent:
         self.depth = depth
         self.max_depth = max_depth
         self.read_only = read_only
-        self.session = session or {
-            "id": datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
-            "created_at": now(),
-            "workspace_root": workspace.repo_root,
-            "history": [],
-            "memory": {"task": "", "files": [], "notes": []},
-        }
+        self.session = session or Session(
+            id=datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6],
+            created_at=now(),
+            workspace_root=workspace.repo_root,
+            history=[],
+            memory=Memory(task="", files=[], notes=[]),
+        )
         self.tools = self.build_tools()
         self.prefix = self.build_prefix()
         self.session_path = self.session_store.save(self.session)
@@ -183,20 +185,20 @@ class MiniAgent:
         )
 
     def memory_text(self: Self) -> str:
-        memory: MemoryDict = self.session["memory"]
-        notes = "\n".join(f"- {note}" for note in memory["notes"]) or "- none"
+        memory: Memory = self.session.memory
+        notes = "\n".join(f"- {note}" for note in memory.notes) or "- none"
         return "\n".join(
             [
                 "Memory:",
-                f"- task: {memory['task'] or '-'}",
-                f"- files: {', '.join(memory['files']) or '-'}",
+                f"- task: {memory.task or '-'}",
+                f"- files: {', '.join(memory.files) or '-'}",
                 "- notes:",
                 notes,
             ]
         )
 
     def history_text(self: Self) -> str:
-        history: HistoryDict = self.session["history"]
+        history: List[History] = self.session.history
         if not history:
             return "- empty"
 
@@ -205,24 +207,27 @@ class MiniAgent:
         recent_start = max(0, len(history) - 6)
         for index, item in enumerate(history):
             recent = index >= recent_start
-            if item["role"] == "tool" and item["name"] in ("write_file", "patch_file"):
-                path = str(item["args"].get("path", ""))
+            if isinstance(item, ToolEntry) and item.name in (
+                "write_file",
+                "patch_file",
+            ):
+                path = str(item.args.get("path", ""))
                 seen_reads.discard(path)
-            if item["role"] == "tool" and item["name"] == "read_file" and not recent:
-                path = str(item["args"].get("path", ""))
+            if isinstance(item, ToolEntry) and item.name == "read_file" and not recent:
+                path = str(item.args.get("path", ""))
                 if path in seen_reads:
                     continue
                 seen_reads.add(path)
 
-            if item["role"] == "tool":
+            if isinstance(item, ToolEntry):
                 limit = 900 if recent else 180
                 lines.append(
-                    f"[tool:{item['name']}] {json.dumps(item['args'], sort_keys=True)}"
+                    f"[tool:{item.name}] {json.dumps(item.args, sort_keys=True)}"
                 )
-                lines.append(clip(item["content"], limit))
+                lines.append(clip(item.content, limit))
             else:
                 limit = 900 if recent else 220
-                lines.append(f"[{item['role']}] {clip(item['content'], limit)}")
+                lines.append(f"[{item.role}] {clip(item.content, limit)}")
 
         return clip("\n".join(lines), MAX_HISTORY)
 
@@ -235,23 +240,23 @@ class MiniAgent:
             ]
         )
 
-    def record(self: Self, item: Dict[str, str]) -> None:
-        self.session["history"].append(item)
+    def record(self: Self, item: History) -> None:
+        self.session.history.append(item)
         self.session_path = self.session_store.save(self.session)
 
     def note_tool(self: Self, name: str, args: Dict[str, str], result: str) -> None:
-        memory = self.session["memory"]
+        memory = self.session.memory
         path = args.get("path")
         if name in {"read_file", "write_file", "patch_file"} and path:
-            self.remember(memory["files"], str(path), 8)
+            self.remember(memory.files, str(path), 8)
         note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
-        self.remember(memory["notes"], note, 5)
+        self.remember(memory.notes, note, 5)
 
     def ask(self: Self, user_message: str) -> str:
-        memory = self.session["memory"]
-        if not memory["task"]:
-            memory["task"] = clip(user_message.strip(), 300)
-        self.record({"role": "user", "content": user_message, "created_at": now()})
+        memory = self.session.memory
+        if not memory.task:
+            memory.task = clip(user_message.strip(), 300)
+        self.record(MessageEntry(role="user", content=user_message, created_at=now()))
 
         tool_steps = 0
         attempts = 0
@@ -271,33 +276,33 @@ class MiniAgent:
                 args = payload.get("args", {})
                 result = self.run_tool(name, args)
                 self.record(
-                    {
-                        "role": "tool",
-                        "name": name,
-                        "args": args,
-                        "content": result,
-                        "created_at": now(),
-                    }
+                    ToolEntry(
+                        role="tool",
+                        name=name,
+                        args=args,
+                        content=result,
+                        created_at=now(),
+                    )
                 )
                 self.note_tool(name, args, result)
                 continue
 
             if kind == "retry":
                 self.record(
-                    {"role": "assistant", "content": payload, "created_at": now()}
+                    MessageEntry(role="assistant", content=payload, created_at=now())
                 )
                 continue
 
             final = (payload or raw).strip()
-            self.record({"role": "assistant", "content": final, "created_at": now()})
-            self.remember(memory["notes"], clip(final, 220), 5)
+            self.record(MessageEntry(role="assistant", content=final, created_at=now()))
+            self.remember(memory.notes, clip(final, 220), 5)
             return final
 
         if attempts >= max_attempts and tool_steps < self.max_steps:
             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
         else:
             final = "Stopped after reaching the step limit without a final answer."
-        self.record({"role": "assistant", "content": final, "created_at": now()})
+        self.record(MessageEntry(role="assistant", content=final, created_at=now()))
         return final
 
     def run_tool(self: Self, name: str, args: Dict[str, str]) -> str:
@@ -323,12 +328,12 @@ class MiniAgent:
 
     def repeated_tool_call(self: Self, name: str, args: Dict[str, str]) -> bool:
         tool_events = [
-            item for item in self.session["history"] if item["role"] == "tool"
+            item for item in self.session.history if isinstance(item, ToolEntry)
         ]
         if len(tool_events) < 2:
             return False
         recent = tool_events[-2:]
-        return all(item["name"] == name and item["args"] == args for item in recent)
+        return all(item.name == name and item.args == args for item in recent)
 
     def tool_example(self: Self, name: str) -> str:
         examples = {
@@ -550,8 +555,8 @@ class MiniAgent:
         return text[start:end]
 
     def reset(self: Self) -> None:
-        self.session["history"] = []
-        self.session["memory"] = {"task": "", "files": [], "notes": []}
+        self.session.history = []
+        self.session.memory = MemoryDictl(task="", files=[], notes=[])
         self.session_store.save(self.session)
 
     def path_is_within_root(self: Self, resolved: Path) -> bool:
@@ -715,6 +720,6 @@ class MiniAgent:
             max_depth=self.max_depth,
             read_only=True,
         )
-        child.session["memory"]["task"] = task
-        child.session["memory"]["notes"] = [clip(self.history_text(), 300)]
+        child.session.memory.task = task
+        child.session.memory.notes = [clip(self.history_text(), 300)]
         return "delegate_result:\n" + child.ask(task)

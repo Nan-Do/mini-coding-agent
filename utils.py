@@ -1,6 +1,7 @@
 from collections.abc import Callable
+from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Dict, List, TypeAlias, TypedDict
+from typing import Any, Dict, List, TypeAlias, TypedDict, Union
 
 
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
@@ -39,25 +40,45 @@ IGNORED_PATH_NAMES = {
 Tools: TypeAlias = Dict[str, Dict[str, str | bool | Callable[..., None]]]
 
 
-class MemoryDict(TypedDict):
+@dataclass
+class Memory:
     task: str
     files: List[str]
     notes: List[str]
 
 
-class HistoryDict(TypedDict):
-    role: str
-    name: str
+@dataclass
+class MessageEntry:
+    role: str  # "user" or "assistant"
     content: str
-    created_at: str
-
-
-class SessionDict(TypedDict):
-    id: str
     created_at: datetime
+
+
+@dataclass
+class ToolEntry:
+    role: str  # always "tool"
+    name: str
+    args: Dict[str, Any]
+    content: str
+    created_at: datetime
+
+
+History: TypeAlias = Union[MessageEntry, ToolEntry]
+
+
+def history_entry_from_dict(d: Dict[str, Any]) -> History:
+    if d.get("role") == "tool":
+        return ToolEntry(**d)
+    return MessageEntry(**d)
+
+
+@dataclass
+class Session:
+    id: str
+    created_at: str
     workspace_root: str
-    history: List[HistoryDict]
-    memory: MemoryDict
+    history: List[History]
+    memory: Memory
 
 
 def now() -> str:
