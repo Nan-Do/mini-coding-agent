@@ -1,7 +1,7 @@
 import dataclasses
 import json
 from pathlib import Path
-from utils import Memory, Session, history_entry_from_dict
+from utils import Memory, MessageEntry, Session, ToolEntry
 
 
 class SessionStore:
@@ -28,7 +28,10 @@ class SessionStore:
     def load(self, session_id: str) -> Session:
         data = json.loads(self.path(session_id).read_text(encoding="utf-8"))
         data["memory"] = Memory(**data["memory"])
-        data["history"] = [history_entry_from_dict(item) for item in data["history"]]
+        data["history"] = [
+            ToolEntry(**item) if item["role"] == "tool" else MessageEntry(**item)
+            for item in data["history"]
+        ]
         return Session(**data)
 
     def latest(self) -> str | None:

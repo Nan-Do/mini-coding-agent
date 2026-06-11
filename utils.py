@@ -66,12 +66,6 @@ class ToolEntry:
 HistoryEntry: TypeAlias = Union[MessageEntry, ToolEntry]
 
 
-def history_entry_from_dict(d: Dict[str, Any]) -> HistoryEntry:
-    if d.get("role") == "tool":
-        return ToolEntry(**d)
-    return MessageEntry(**d)
-
-
 @dataclass
 class Session:
     id: str
