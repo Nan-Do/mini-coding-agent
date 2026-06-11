@@ -1,7 +1,7 @@
 import dataclasses
 import json
 from pathlib import Path
-from utils import Session, history_entry_from_dict
+from utils import Memory, Session, history_entry_from_dict
 
 
 class SessionStore:
@@ -27,8 +27,9 @@ class SessionStore:
 
     def load(self, session_id: str) -> Session:
         data = json.loads(self.path(session_id).read_text(encoding="utf-8"))
+        data["memory"] = Memory(**data["memory"])
         data["history"] = [history_entry_from_dict(item) for item in data["history"]]
-        return data
+        return Session(**data)
 
     def latest(self) -> str | None:
         files = sorted(self.root.glob("*.json"), key=lambda path: path.stat().st_mtime)
