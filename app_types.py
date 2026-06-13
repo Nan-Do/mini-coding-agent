@@ -1,0 +1,49 @@
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Dict, List, TypeAlias, Union
+
+
+@dataclass
+class ToolDescriptionEntry:
+    schema: dict
+    risky: bool
+    description: str
+    run: Callable
+
+
+Tools: TypeAlias = Dict[str, ToolDescriptionEntry]
+
+
+@dataclass
+class Memory:
+    task: str
+    files: List[str]
+    notes: List[str]
+
+
+@dataclass
+class MessageEntry:
+    role: str  # "user" or "assistant"
+    content: str
+    created_at: str
+
+
+@dataclass
+class ToolMessageEntry:
+    role: str  # always "tool"
+    name: str
+    args: Dict[str, Any]
+    content: str
+    created_at: str
+
+
+HistoryEntry: TypeAlias = Union[MessageEntry, ToolMessageEntry]
+
+
+@dataclass
+class Session:
+    id: str
+    created_at: str
+    workspace_root: str
+    history: List[HistoryEntry]
+    memory: Memory
