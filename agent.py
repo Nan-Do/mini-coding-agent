@@ -17,7 +17,7 @@ from utils import (
     Memory,
     MessageEntry,
     Session,
-    ToolEntry,
+    ToolMessageEntry,
 )
 
 
@@ -110,11 +110,9 @@ class MiniAgent:
     def build_prefix(self: Self) -> str:
         tool_lines = []
         for name, tool in self.tools.items():
-            fields = ", ".join(
-                f"{key}: {value}" for key, value in tool["schema"].items()
-            )
-            risk = "approval required" if tool["risky"] else "safe"
-            tool_lines.append(f"- {name}({fields}) [{risk}] {tool['description']}")
+            fields = ", ".join(f"{key}: {value}" for key, value in tool.schema.items())
+            risk = "approval required" if tool.risky else "safe"
+            tool_lines.append(f"- {name}({fields}) [{risk}] {tool.description}")
         tool_text = "\n".join(tool_lines)
         examples = "\n".join(
             [
@@ -179,16 +177,23 @@ class MiniAgent:
         recent_start = max(0, len(history) - 6)
         for index, item in enumerate(history):
             recent = index >= recent_start
-            if isinstance(item, ToolEntry) and item.name in ("write_file", "patch_file"):
+            if isinstance(item, ToolMessageEntry) and item.name in (
+                "write_file",
+                "patch_file",
+            ):
                 path = str(item.args.get("path", ""))
                 seen_reads.discard(path)
-            if isinstance(item, ToolEntry) and item.name == "read_file" and not recent:
+            if (
+                isinstance(item, ToolMessageEntry)
+                and item.name == "read_file"
+                and not recent
+            ):
                 path = str(item.args.get("path", ""))
                 if path in seen_reads:
                     continue
                 seen_reads.add(path)
 
-            if isinstance(item, ToolEntry):
+            if isinstance(item, ToolMessageEntry):
                 limit = 900 if recent else 180
                 lines.append(
                     f"[tool:{item.name}] {json.dumps(item.args, sort_keys=True)}"
@@ -245,7 +250,7 @@ class MiniAgent:
                 args = payload.get("args", {})
                 result = self.tools.run(name, args)
                 self.record(
-                    ToolEntry(
+                    ToolMessageEntry(
                         role="tool",
                         name=name,
                         args=args,

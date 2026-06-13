@@ -36,8 +36,16 @@ IGNORED_PATH_NAMES = {
     "venv",
 }
 
-# Custom types:
-Tools: TypeAlias = Dict[str, Dict[str, str | bool | Callable[..., None]]]
+
+@dataclass
+class ToolDescriptionEntry:
+    schema: dict
+    risky: bool
+    description: str
+    run: Callable
+
+
+Tools: TypeAlias = Dict[str, ToolDescriptionEntry]
 
 
 @dataclass
@@ -55,7 +63,7 @@ class MessageEntry:
 
 
 @dataclass
-class ToolEntry:
+class ToolMessageEntry:
     role: str  # always "tool"
     name: str
     args: Dict[str, Any]
@@ -63,7 +71,7 @@ class ToolEntry:
     created_at: datetime
 
 
-HistoryEntry: TypeAlias = Union[MessageEntry, ToolEntry]
+HistoryEntry: TypeAlias = Union[MessageEntry, ToolMessageEntry]
 
 
 @dataclass

@@ -5,7 +5,14 @@ from pathlib import Path
 from typing import Callable, Dict, List
 
 from workspace import WorkspaceContext
-from utils import IGNORED_PATH_NAMES, HistoryEntry, ToolEntry, Tools, clip
+from utils import (
+    IGNORED_PATH_NAMES,
+    HistoryEntry,
+    ToolMessageEntry,
+    Tools,
+    ToolDescriptionEntry,
+    clip,
+)
 
 
 class ToolRegistry:
@@ -47,59 +54,59 @@ class ToolRegistry:
             return message
         if self._repeated_call(name, args):
             return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
-        if tool["risky"] and not self._approve(name, args):
+        if tool.risky and not self._approve(name, args):
             return f"error: approval denied for {name}"
         try:
-            return clip(tool["run"](args))
+            return clip(tool.run(args))
         except Exception as exc:
             return f"error: tool {name} failed: {exc}"
 
     def _build(self) -> Tools:
         tools = {
-            "list_files": {
-                "schema": {"path": "str='.'"},
-                "risky": False,
-                "description": "List files in the workspace.",
-                "run": self._tool_list_files,
-            },
-            "read_file": {
-                "schema": {"path": "str", "start": "int=1", "end": "int=200"},
-                "risky": False,
-                "description": "Read a UTF-8 file by line range.",
-                "run": self._tool_read_file,
-            },
-            "search": {
-                "schema": {"pattern": "str", "path": "str='.'"},
-                "risky": False,
-                "description": "Search the workspace with rg or a simple fallback.",
-                "run": self._tool_search,
-            },
-            "run_shell": {
-                "schema": {"command": "str", "timeout": "int=20"},
-                "risky": True,
-                "description": "Run a shell command in the repo root.",
-                "run": self._tool_run_shell,
-            },
-            "write_file": {
-                "schema": {"path": "str", "content": "str"},
-                "risky": True,
-                "description": "Write a text file.",
-                "run": self._tool_write_file,
-            },
-            "patch_file": {
-                "schema": {"path": "str", "old_text": "str", "new_text": "str"},
-                "risky": True,
-                "description": "Replace one exact text block in a file.",
-                "run": self._tool_patch_file,
-            },
+            "list_files": ToolDescriptionEntry(
+                schema={"path": "str='.'"},
+                risky=False,
+                description="List files in the workspace.",
+                run=self._tool_list_files,
+            ),
+            "read_file": ToolDescriptionEntry(
+                schema={"path": "str", "start": "int=1", "end": "int=200"},
+                risky=False,
+                description="Read a UTF-8 file by line range.",
+                run=self._tool_read_file,
+            ),
+            "search": ToolDescriptionEntry(
+                schema={"pattern": "str", "path": "str='.'"},
+                risky=False,
+                description="Search the workspace with rg or a simple fallback.",
+                run=self._tool_search,
+            ),
+            "run_shell": ToolDescriptionEntry(
+                schema={"command": "str", "timeout": "int=20"},
+                risky=True,
+                description="Run a shell command in the repo root.",
+                run=self._tool_run_shell,
+            ),
+            "write_file": ToolDescriptionEntry(
+                schema={"path": "str", "content": "str"},
+                risky=True,
+                description="Write a text file.",
+                run=self._tool_write_file,
+            ),
+            "patch_file": ToolDescriptionEntry(
+                schema={"path": "str", "old_text": "str", "new_text": "str"},
+                risky=True,
+                description="Replace one exact text block in a file.",
+                run=self._tool_patch_file,
+            ),
         }
         if self.delegate_fn is not None:
-            tools["delegate"] = {
-                "schema": {"task": "str", "max_steps": "int=3"},
-                "risky": False,
-                "description": "Ask a bounded read-only child agent to investigate.",
-                "run": self._tool_delegate,
-            }
+            tools["delegate"] = ToolDescriptionEntry(
+                schema={"task": "str", "max_steps": "int=3"},
+                risky=False,
+                description="Ask a bounded read-only child agent to investigate.",
+                run=self._tool_delegate,
+            )
         return tools
 
     def _path_is_within_root(self, resolved: Path) -> bool:
@@ -214,7 +221,9 @@ class ToolRegistry:
         return examples.get(name, "")
 
     def _repeated_call(self, name: str, args: Dict) -> bool:
-        tool_events = [item for item in self.get_history() if isinstance(item, ToolEntry)]
+        tool_events = [
+            item for item in self.get_history() if isinstance(item, ToolMessageEntry)
+        ]
         if len(tool_events) < 2:
             return False
         recent = tool_events[-2:]
