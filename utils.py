@@ -1,7 +1,4 @@
-from collections.abc import Callable
-from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, TypeAlias, TypedDict, Union
 
 
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
@@ -35,52 +32,6 @@ IGNORED_PATH_NAMES = {
     ".venv",
     "venv",
 }
-
-
-@dataclass
-class ToolDescriptionEntry:
-    schema: dict
-    risky: bool
-    description: str
-    run: Callable
-
-
-Tools: TypeAlias = Dict[str, ToolDescriptionEntry]
-
-
-@dataclass
-class Memory:
-    task: str
-    files: List[str]
-    notes: List[str]
-
-
-@dataclass
-class MessageEntry:
-    role: str  # "user" or "assistant"
-    content: str
-    created_at: datetime
-
-
-@dataclass
-class ToolMessageEntry:
-    role: str  # always "tool"
-    name: str
-    args: Dict[str, Any]
-    content: str
-    created_at: datetime
-
-
-HistoryEntry: TypeAlias = Union[MessageEntry, ToolMessageEntry]
-
-
-@dataclass
-class Session:
-    id: str
-    created_at: str
-    workspace_root: str
-    history: List[HistoryEntry]
-    memory: Memory
 
 
 def now() -> str:

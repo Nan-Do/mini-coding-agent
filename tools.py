@@ -5,13 +5,12 @@ from pathlib import Path
 from typing import Callable, Dict, List
 
 from workspace import WorkspaceContext
-from utils import (
-    IGNORED_PATH_NAMES,
+from utils import IGNORED_PATH_NAMES, clip
+from app_types import (
     HistoryEntry,
     ToolMessageEntry,
     Tools,
     ToolDescriptionEntry,
-    clip,
 )
 
 

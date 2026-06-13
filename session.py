@@ -1,7 +1,7 @@
 import dataclasses
 import json
 from pathlib import Path
-from utils import Memory, MessageEntry, Session, ToolMessageEntry
+from app_types import Memory, MessageEntry, Session, ToolMessageEntry
 
 
 class SessionStore:

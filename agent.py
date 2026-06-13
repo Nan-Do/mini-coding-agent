@@ -9,15 +9,17 @@ from session import SessionStore
 from tools import ToolRegistry
 from typing import Dict, List, Self, Tuple
 from workspace import WorkspaceContext
-from utils import (
-    MAX_HISTORY,
-    now,
-    clip,
+from app_types import (
     HistoryEntry,
     Memory,
     MessageEntry,
     Session,
     ToolMessageEntry,
+)
+from utils import (
+    MAX_HISTORY,
+    now,
+    clip,
 )
 
 
