@@ -1,9 +1,11 @@
 import argparse
 import shutil
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from agent import MiniAgent
+from agent_logging import AgentLogger
 from model_clients import LlamaCppModelClient
 from session import SessionStore
 from utils import HELP_DETAILS, WELCOME_ART, middle
@@ -56,9 +58,18 @@ def build_welcome(agent: MiniAgent, model: str, context: int, host: str) -> str:
     return "\n".join([line, *rows, line])
 
 
+def build_logger(args: argparse.Namespace, repo_root: str) -> AgentLogger:
+    if args.no_log:
+        return AgentLogger(None, enabled=False)
+    log_dir = Path(args.log_dir or Path(repo_root) / ".mini-coding-agent" / "logs")
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return AgentLogger(log_dir / f"run-{run_id}.jsonl")
+
+
 def build_agent(args: argparse.Namespace) -> MiniAgent:
     workspace = WorkspaceContext.build(args.cwd)
     store = SessionStore(Path(workspace.repo_root) / ".mini-coding-agent" / "sessions")
+    logger = build_logger(args, workspace.repo_root)
     model = LlamaCppModelClient(
         model=args.model,
         host=args.host,
@@ -66,6 +77,7 @@ def build_agent(args: argparse.Namespace) -> MiniAgent:
         temperature=args.temperature,
         top_p=args.top_p,
         timeout=args.llama_timeout,
+        logger=logger,
     )
     session_id = args.resume
     if session_id == "latest":
@@ -79,6 +91,7 @@ def build_agent(args: argparse.Namespace) -> MiniAgent:
             approval_policy=args.approval,
             max_steps=args.max_steps,
             max_new_tokens=args.max_new_tokens,
+            logger=logger,
         )
     return MiniAgent(
         model_client=model,
@@ -87,6 +100,7 @@ def build_agent(args: argparse.Namespace) -> MiniAgent:
         approval_policy=args.approval,
         max_steps=args.max_steps,
         max_new_tokens=args.max_new_tokens,
+        logger=logger,
     )
 
 
@@ -145,6 +159,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=0.9,
         help="Top-p sampling value sent to llama-server.",
     )
+    parser.add_argument(
+        "--log-dir",
+        default=None,
+        help="Directory for JSONL run logs (default: <repo>/.mini-coding-agent/logs).",
+    )
+    parser.add_argument(
+        "--no-log",
+        action="store_true",
+        help="Disable structured logging of memory, history, and llama-server traffic.",
+    )
     return parser
 
 
@@ -191,6 +215,9 @@ def main() -> int:
             continue
         if user_input == "/session":
             print(agent.session_path)
+            continue
+        if user_input == "/log":
+            print(agent.log_path)
             continue
         if user_input == "/reset":
             agent.reset()

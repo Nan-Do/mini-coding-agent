@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+from agent_logging import AgentLogger
 from model_clients import LlamaCppModelClient
 from session import SessionStore
 from tools import ToolRegistry
@@ -36,6 +37,7 @@ class MiniAgent:
         depth: int = 0,
         max_depth: int = 1,
         read_only: bool = False,
+        logger: AgentLogger | None = None,
     ) -> None:
         self.model_client = model_client
         self.workspace = workspace
@@ -53,6 +55,16 @@ class MiniAgent:
             workspace_root=workspace.repo_root,
             history=[],
             memory=Memory(task="", files=[], notes=[]),
+        )
+        base_logger = logger or AgentLogger(None, enabled=False)
+        self.logger = base_logger.child(session=self.session.id, depth=self.depth)
+        self.logger.log(
+            "session_start",
+            workspace_root=self.session.workspace_root,
+            approval_policy=self.approval_policy,
+            read_only=self.read_only,
+            resumed=session is not None,
+            history_len=len(self.session.history),
         )
         self.tools = ToolRegistry(
             workspace=self.workspace,
@@ -104,6 +116,7 @@ class MiniAgent:
             depth=self.depth + 1,
             max_depth=self.max_depth,
             read_only=True,
+            logger=self.logger,
         )
         child.session.memory.task = task
         child.session.memory.notes = [clip(self.history_text(), 300)]
@@ -216,8 +229,36 @@ class MiniAgent:
             ]
         )
 
+    def memory_snapshot(self: Self) -> Dict[str, object]:
+        memory = self.session.memory
+        return {
+            "task": memory.task,
+            "files": list(memory.files),
+            "notes": list(memory.notes),
+        }
+
+    def log_memory(self: Self, reason: str) -> None:
+        self.logger.log("memory_update", reason=reason, memory=self.memory_snapshot())
+
     def record(self: Self, item: HistoryEntry) -> None:
         self.session.history.append(item)
+        if isinstance(item, ToolMessageEntry):
+            self.logger.log(
+                "history_append",
+                entry="tool",
+                index=len(self.session.history) - 1,
+                name=item.name,
+                args=item.args,
+                content=clip(item.content, 2000),
+            )
+        else:
+            self.logger.log(
+                "history_append",
+                entry="message",
+                index=len(self.session.history) - 1,
+                role=item.role,
+                content=clip(item.content, 2000),
+            )
         self.session_path = self.session_store.save(self.session)
 
     def note_tool(self: Self, name: str, args: Dict[str, str], result: str) -> None:
@@ -227,11 +268,19 @@ class MiniAgent:
             self.remember(memory.files, str(path), 8)
         note = f"{name}: {clip(str(result).replace(chr(10), ' '), 220)}"
         self.remember(memory.notes, note, 5)
+        self.log_memory(f"note_tool:{name}")
 
     def ask(self: Self, user_message: str) -> str:
         memory = self.session.memory
         if not memory.task:
             memory.task = clip(user_message.strip(), 300)
+        self.logger.log(
+            "request_start",
+            max_steps=self.max_steps,
+            max_new_tokens=self.max_new_tokens,
+            user_message=clip(user_message, 2000),
+        )
+        self.log_memory("request_start")
         self.record(MessageEntry(role="user", content=user_message, created_at=now()))
 
         tool_steps = 0
@@ -241,16 +290,39 @@ class MiniAgent:
         while tool_steps < self.max_steps and attempts < max_attempts:
             attempts += 1
             system_prompt, user_prompt = self.prompt(user_message)
+            self.logger.log(
+                "prompt_built",
+                attempt=attempts,
+                tool_step=tool_steps,
+                system_len=len(system_prompt),
+                user_len=len(user_prompt),
+                memory_text=self.memory_text(),
+                history_text=self.history_text(),
+            )
             raw = self.model_client.complete(
                 system_prompt, user_prompt, self.max_new_tokens
             )
             kind, payload = self.parse(raw)
+            self.logger.log(
+                "model_output",
+                attempt=attempts,
+                tool_step=tool_steps,
+                parse_kind=kind,
+                raw=clip(raw, 2000),
+            )
 
             if kind == "tool":
                 tool_steps += 1
                 name = payload.get("name", "")
                 args = payload.get("args", {})
+                self.logger.log("tool_call", name=name, args=args, step=tool_steps)
                 result = self.tools.run(name, args)
+                self.logger.log(
+                    "tool_result",
+                    name=name,
+                    step=tool_steps,
+                    result=clip(result, 2000),
+                )
                 self.record(
                     ToolMessageEntry(
                         role="tool",
@@ -264,6 +336,7 @@ class MiniAgent:
                 continue
 
             if kind == "retry":
+                self.logger.log("retry", attempt=attempts, notice=clip(str(payload), 500))
                 self.record(
                     MessageEntry(role="assistant", content=payload, created_at=now())
                 )
@@ -272,13 +345,30 @@ class MiniAgent:
             final = (payload or raw).strip()
             self.record(MessageEntry(role="assistant", content=final, created_at=now()))
             self.remember(memory.notes, clip(final, 220), 5)
+            self.log_memory("final")
+            self.logger.log(
+                "final",
+                reason="answer",
+                tool_steps=tool_steps,
+                attempts=attempts,
+                final=clip(final, 2000),
+            )
             return final
 
         if attempts >= max_attempts and tool_steps < self.max_steps:
             final = "Stopped after too many malformed model responses without a valid tool call or final answer."
+            reason = "max_attempts"
         else:
             final = "Stopped after reaching the step limit without a final answer."
+            reason = "max_steps"
         self.record(MessageEntry(role="assistant", content=final, created_at=now()))
+        self.logger.log(
+            "final",
+            reason=reason,
+            tool_steps=tool_steps,
+            attempts=attempts,
+            final=clip(final, 2000),
+        )
         return final
 
     @staticmethod
@@ -411,3 +501,8 @@ class MiniAgent:
         self.session.history = []
         self.session.memory = Memory(task="", files=[], notes=[])
         self.session_store.save(self.session)
+        self.logger.log("reset")
+
+    @property
+    def log_path(self: Self) -> str:
+        return str(self.logger.path) if self.logger.path else "(logging disabled)"

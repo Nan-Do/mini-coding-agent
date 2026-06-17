@@ -4,6 +4,8 @@ import urllib.request
 
 from typing import Dict, List, Self, Sequence, Tuple
 
+from agent_logging import AgentLogger
+
 
 class FakeModelClient:
     def __init__(self, outputs: Sequence):
@@ -66,12 +68,14 @@ class LlamaCppModelClient:
         temperature: float,
         top_p: float,
         timeout: int,
+        logger: AgentLogger | None = None,
     ):
         self.url = f"http://{host}:{port}"
         self.temperature = temperature
         self.top_p = top_p
         self.timeout = timeout
         self.model = model
+        self.logger = logger or AgentLogger(None, enabled=False)
         self.__check_model()
 
     def complete(self, system: str, prompt: str, max_new_tokens: int) -> str:
@@ -84,6 +88,16 @@ class LlamaCppModelClient:
             "top_p": self.top_p,
             "max_tokens": max_new_tokens,
         }
+        self.logger.log(
+            "llm_request",
+            backend="llama-server",
+            url=self.url + "/v1/chat/completions",
+            model=self.model,
+            temperature=self.temperature,
+            top_p=self.top_p,
+            max_tokens=max_new_tokens,
+            messages=payload["messages"],
+        )
         request = urllib.request.Request(
             self.url + "/v1/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -93,20 +107,33 @@ class LlamaCppModelClient:
 
         has_more_data = True
         assistant_message = ""
+        round_index = 0
         while has_more_data:
             data = self.__make_request(request)
-            with open("requests.txt", "w+") as f:
-                f.write(json.dumps(payload["messages"]))
-                f.write("\n\n")
+            round_index += 1
 
-            assistant_message = data["choices"][0]["message"]["content"]
-            if data["choices"][0]["finish_reason"] != "length":
+            choice = data["choices"][0]
+            assistant_message = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason")
+            self.logger.log(
+                "llm_response",
+                round=round_index,
+                finish_reason=finish_reason,
+                usage=data.get("usage"),
+                content=assistant_message,
+            )
+
+            if finish_reason != "length":
                 has_more_data = False
-                with open("answers.txt", "w+") as f:
-                    f.write(json.dumps(data))
             else:
                 payload["messages"] = self.__build_messages(
                     messages + [("assistant", assistant_message)]
+                )
+                self.logger.log(
+                    "llm_continuation",
+                    round=round_index,
+                    reason="finish_reason=length; requesting continuation",
+                    messages=payload["messages"],
                 )
                 request = urllib.request.Request(
                     self.url + "/v1/chat/completions",

@@ -172,6 +172,8 @@ being sent to the model as a normal task.
   prints the distilled session memory, including the current task, tracked files, and notes
 - `/session`
   prints the path to the current saved session JSON file
+- `/log`
+  prints the path to the current JSONL run log (memory, history, and llama-server traffic)
 - `/reset`
   clears the current session history and distilled memory but keeps you in the REPL
 - `/exit`
@@ -220,6 +222,38 @@ Important flags:
   controls sampling randomness; default: `0.2`
 - `--top-p`
   controls nucleus sampling for generation; default: `0.9`
+- `--log-dir`
+  directory for the JSONL run logs; default: `<repo>/.mini-coding-agent/logs`
+- `--no-log`
+  disables structured logging entirely
+
+&nbsp;
+
+## Logging
+
+By default each run writes a structured [JSON Lines](https://jsonlines.org) log
+to `.mini-coding-agent/logs/run-<timestamp>.jsonl` (under the workspace root, so
+it is already git-ignored). It records, in order, everything the agent stores
+and exchanges so you can analyze a run after the fact:
+
+- `session_start` — session id, workspace, approval policy, whether it resumed
+- `request_start` / `final` — the lifecycle of a single `ask()`
+- `memory_update` — a full snapshot of the distilled memory (task, files, notes)
+  every time it changes
+- `history_append` — each message or tool entry added to the transcript
+- `prompt_built` — the exact `memory` and `history` text assembled for the model
+- `llm_request` / `llm_response` / `llm_continuation` — the raw prompts, model
+  params, and completions exchanged with the llama-server backend
+- `tool_call` / `tool_result` — tool invocations and their output
+- `model_output` / `retry` — raw model text and how it was parsed
+
+Each line is one self-contained JSON object tagged with a UTC timestamp,
+session id, and agent `depth` (nested `delegate` agents log to the same file).
+Inspect a run, for example, with:
+
+```bash
+cat .mini-coding-agent/logs/run-*.jsonl | jq 'select(.event=="llm_request")'
+```
 
 &nbsp;
 
