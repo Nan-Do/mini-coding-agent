@@ -8,7 +8,7 @@ from agent import MiniAgent
 from agent_logging import AgentLogger
 from model_clients import LlamaCppModelClient
 from session import SessionStore
-from utils import HELP_DETAILS, WELCOME_ART, middle
+from utils import HELP_DETAILS, WELCOME_ART, clip, middle
 from workspace import WorkspaceContext
 
 
@@ -189,9 +189,11 @@ def main() -> int:
         prompt = " ".join(args.prompt).strip()
         if prompt:
             print()
+            agent.logger.log("repl_input", mode="one_shot", text=clip(prompt, 2000))
             try:
                 print(agent.ask(prompt))
             except RuntimeError as exc:
+                agent.logger.log("repl_error", mode="one_shot", error=str(exc))
                 print(str(exc), file=sys.stderr)
                 return 1
         return 0
@@ -200,34 +202,43 @@ def main() -> int:
         try:
             user_input = input("\nmini-coding-agent> ").strip()
         except (EOFError, KeyboardInterrupt):
+            agent.logger.log("repl_exit", reason="eof_or_interrupt")
             print("")
             return 0
 
         if not user_input:
             continue
         if user_input in {"/exit", "/quit"}:
+            agent.logger.log("repl_command", command=user_input)
             return 0
         if user_input == "/help":
+            agent.logger.log("repl_command", command=user_input)
             print(HELP_DETAILS)
             continue
         if user_input == "/memory":
+            agent.logger.log("repl_command", command=user_input)
             print(agent.memory_text())
             continue
         if user_input == "/session":
+            agent.logger.log("repl_command", command=user_input)
             print(agent.session_path)
             continue
         if user_input == "/log":
+            agent.logger.log("repl_command", command=user_input)
             print(agent.log_path)
             continue
         if user_input == "/reset":
+            agent.logger.log("repl_command", command=user_input)
             agent.reset()
             print("session reset")
             continue
 
         print()
+        agent.logger.log("repl_input", mode="interactive", text=clip(user_input, 2000))
         try:
             print(agent.ask(user_input))
         except RuntimeError as exc:
+            agent.logger.log("repl_error", mode="interactive", error=str(exc))
             print(str(exc), file=sys.stderr)
 
 

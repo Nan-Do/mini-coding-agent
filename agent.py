@@ -75,6 +75,7 @@ class MiniAgent:
             max_depth=self.max_depth,
             get_history=lambda: self.session.history,
             delegate_fn=self._make_delegate if self.depth < self.max_depth else None,
+            logger=self.logger,
         )
         self.prefix = self.build_prefix()
         self.session_path = self.session_store.save(self.session)

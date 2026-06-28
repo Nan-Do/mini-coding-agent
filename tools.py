@@ -1,9 +1,11 @@
 import json
 import shutil
 import subprocess
+import traceback
 from pathlib import Path
 from typing import Callable, Dict, List
 
+from agent_logging import AgentLogger
 from workspace import WorkspaceContext
 from utils import IGNORED_PATH_NAMES, clip
 from app_types import (
@@ -265,6 +267,7 @@ class ToolRegistry:
         max_depth: int,
         get_history: Callable[[], List[HistoryEntry]],
         delegate_fn: Callable[[str, int], str] | None = None,
+        logger: AgentLogger | None = None,
     ) -> None:
         self.workspace = workspace
         self.root = root
@@ -274,6 +277,7 @@ class ToolRegistry:
         self.max_depth = max_depth
         self.get_history = get_history
         self.delegate_fn = delegate_fn
+        self.logger = logger or AgentLogger(None, enabled=False)
         self._registry: Tools = self._build()
 
     def items(self):
@@ -282,18 +286,39 @@ class ToolRegistry:
     def run(self, name: str, args: Dict) -> str:
         tool = self._registry.get(name, None)
         if tool is None:
+            self.logger.log("tool_unknown", name=name, args=args)
             return f"error: unknown tool '{name}'"
 
         if self._repeated_call(name, args):
+            self.logger.log("tool_blocked", name=name, args=args, reason="repeated_call")
             return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
 
-        if tool.risky and not self._approve(name, args):
-            return f"error: approval denied for {name}"
+        if tool.risky:
+            approved = self._approve(name, args)
+            self.logger.log(
+                "tool_approval",
+                name=name,
+                args=args,
+                risky=True,
+                policy=self.approval_policy,
+                read_only=self.read_only,
+                granted=approved,
+            )
+            if not approved:
+                return f"error: approval denied for {name}"
 
         try:
             # The tool.run callable handles both execution and validation now
             return clip(tool.run(args))
         except Exception as exc:
+            self.logger.log(
+                "tool_error",
+                name=name,
+                args=args,
+                error_type=type(exc).__name__,
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
             example = _TOOL_EXAMPLES.get(name, "")
             message = f"error: tool {name} failed: {exc}"
             if example:
