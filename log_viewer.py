@@ -2,6 +2,8 @@ import argparse
 import json
 import math
 
+from collections import Counter
+
 
 def print_json_object(data, spaces=0):
     if type(data) is list:
@@ -57,6 +59,8 @@ def main():
     )
 
     line_num = 0
+    events = Counter()
+
     args = parser.parse_args()
     jsonl_file = args.jsonl_file
     to_show = math.inf
@@ -65,7 +69,6 @@ def main():
     filter_type = None
     if args.filter:
         filter_type = args.filter
-    events = set()
     show_events = args.show_events
 
     with open(jsonl_file, "r") as f:
@@ -76,11 +79,12 @@ def main():
             except json.JSONDecodeError:
                 continue
 
+            event = data["event"]
             if show_events:
-                events.add(data["event"])
+                events[event] += 1
                 continue
 
-            if filter_type and data["event"] != filter_type:
+            if filter_type and event != filter_type:
                 continue
 
             print_json_object(data)
@@ -89,7 +93,10 @@ def main():
                 break
 
     if show_events:
-        print(events)
+        print("Summary:")
+        print("--------")
+        for event in events:
+            print(f'"{event}": {events[event]}')
 
 
 if __name__ == "__main__":
