@@ -1,64 +1,33 @@
 import json
-import urllib.error
-import urllib.request
 
-from typing import Dict, List, Self, Sequence, Tuple
+from typing import Dict, List, Self, Sequence
+
+from openai import OpenAI, OpenAIError
 
 from agent_logging import AgentLogger
-
-
-class FakeModelClient:
-    def __init__(self, outputs: Sequence):
-        self.outputs = list(outputs)
-        self.prompts = []
-
-    def complete(self, prompt: str, max_new_tokens: int):
-        self.prompts.append(prompt)
-        if not self.outputs:
-            raise RuntimeError("fake model ran out of outputs")
-        return self.outputs.pop(0)
+from app_types import ModelResponse, ToolCall
 
 
 class LlamaCppModelClient:
-    def __build_messages(
-        self: Self, messages: List[Tuple[str, str]]
-    ) -> List[Dict[str, str]]:
-        return [{"role": role, "content": content} for role, content in messages]
-
-    def __make_request(self: Self, request):
+    def __check_model(self: Self):
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(
-                f"LlamaCpp request failed with HTTP {exc.code}: {body}"
-            ) from exc
-        except urllib.error.URLError as exc:
+            models = self.client.models.list()
+        except OpenAIError as exc:
             raise RuntimeError(
                 "Could not reach LlamaCpp.\n"
                 "Make sure `llama-server` is running.\n"
-                f"URL: {self.url}\n"
+                f"URL: {self.base_url}\n"
                 f"Model: {self.model}"
             ) from exc
 
-    def __check_model(self: Self):
-        request = urllib.request.Request(
-            self.url + "/v1/models",
-            headers={"Content-Type": "application/json"},
-            method="GET",
-        )
-        data = self.__make_request(request)
-        if data.get("error"):
-            raise RuntimeError(f"Llama-server error: {data['error']}")
+        available = list(models.data)
+        if not available:
+            raise RuntimeError("Llama-server reported no available models")
 
-        idx = 0
-        for t_idx, model in enumerate(data["models"]):
-            if model["name"] == self.model:
-                idx = t_idx
-                break
-        self.model = data["models"][idx]["name"]
-        self.ctx = data["data"][idx]["meta"]["n_ctx"]
+        chosen = next((m for m in available if m.id == self.model), available[0])
+        self.model = chosen.id
+        meta = getattr(chosen, "model_extra", None) or {}
+        self.ctx = (meta.get("meta") or {}).get("n_ctx", 0)
 
     def __init__(
         self: Self,
@@ -70,76 +39,110 @@ class LlamaCppModelClient:
         timeout: int,
         logger: AgentLogger | None = None,
     ):
-        self.url = f"http://{host}:{port}"
+        self.base_url = f"http://{host}:{port}/v1"
         self.temperature = temperature
         self.top_p = top_p
         self.timeout = timeout
         self.model = model
         self.logger = logger or AgentLogger(None, enabled=False)
+        self.client = OpenAI(
+            base_url=self.base_url,
+            api_key="sk-no-key-required",
+            timeout=timeout,
+        )
         self.__check_model()
 
-    def complete(self, system: str, prompt: str, max_new_tokens: int) -> str:
-        messages = [("system", system), ("user", prompt)]
-
-        payload = {
+    def __create(self, messages, tools, max_new_tokens):
+        kwargs = {
             "model": self.model,
-            "messages": self.__build_messages(messages),
+            "messages": messages,
             "temperature": self.temperature,
             "top_p": self.top_p,
             "max_tokens": max_new_tokens,
         }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except OpenAIError as exc:
+            raise RuntimeError(f"LlamaCpp chat completion failed: {exc}") from exc
+
+    @staticmethod
+    def __parse_tool_calls(message) -> List[ToolCall]:
+        calls = []
+        for call in message.tool_calls or []:
+            raw_args = call.function.arguments or "{}"
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                args = {}
+            if not isinstance(args, dict):
+                args = {}
+            calls.append(ToolCall(id=call.id, name=call.function.name, args=args))
+        return calls
+
+    def complete(
+        self: Self,
+        system: str,
+        prompt: str,
+        max_new_tokens: int,
+        tools: List[Dict] | None = None,
+    ) -> ModelResponse:
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
         self.logger.log(
             "llm_request",
             backend="llama-server",
-            url=self.url + "/v1/chat/completions",
+            url=self.base_url + "/chat/completions",
             model=self.model,
             temperature=self.temperature,
             top_p=self.top_p,
             max_tokens=max_new_tokens,
-            messages=payload["messages"],
-        )
-        request = urllib.request.Request(
-            self.url + "/v1/chat/completions",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+            tools=[tool["function"]["name"] for tool in (tools or [])],
+            messages=messages,
         )
 
-        has_more_data = True
         assistant_message = ""
+        tool_calls: List[ToolCall] = []
         round_index = 0
+        has_more_data = True
         while has_more_data:
-            data = self.__make_request(request)
+            completion = self.__create(messages, tools, max_new_tokens)
             round_index += 1
 
-            choice = data["choices"][0]
-            assistant_message = choice["message"]["content"]
-            finish_reason = choice.get("finish_reason")
+            choice = completion.choices[0]
+            message = choice.message
+            chunk = message.content or ""
+            assistant_message += chunk
+            tool_calls = self.__parse_tool_calls(message)
+            finish_reason = choice.finish_reason
+            usage = completion.usage.model_dump() if completion.usage else None
             self.logger.log(
                 "llm_response",
                 round=round_index,
                 finish_reason=finish_reason,
-                usage=data.get("usage"),
-                content=assistant_message,
+                usage=usage,
+                tool_calls=[
+                    {"name": call.name, "args": call.args} for call in tool_calls
+                ],
+                content=chunk,
             )
 
-            if finish_reason != "length":
-                has_more_data = False
-            else:
-                payload["messages"] = self.__build_messages(
-                    messages + [("assistant", assistant_message)]
-                )
+            # Only plain-text answers are continued; tool calls finish a turn.
+            if finish_reason == "length" and not tool_calls:
+                messages = messages + [
+                    {"role": "assistant", "content": assistant_message}
+                ]
                 self.logger.log(
                     "llm_continuation",
                     round=round_index,
                     reason="finish_reason=length; requesting continuation",
-                    messages=payload["messages"],
+                    messages=messages,
                 )
-                request = urllib.request.Request(
-                    self.url + "/v1/chat/completions",
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
+            else:
+                has_more_data = False
 
-        return assistant_message
+        return ModelResponse(content=assistant_message, tool_calls=tool_calls)

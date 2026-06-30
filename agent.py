@@ -1,5 +1,4 @@
 import json
-import re
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -124,48 +123,25 @@ class MiniAgent:
         return "delegate_result:\n" + child.ask(task)
 
     def build_prefix(self: Self) -> str:
-        tool_lines = []
-        for name, tool in self.tools.items():
-            fields = ", ".join(f"{key}: {value}" for key, value in tool.schema.items())
-            risk = "approval required" if tool.risky else "safe"
-            tool_lines.append(f"- {name}({fields}) [{risk}] {tool.description}")
-        tool_text = "\n".join(tool_lines)
-        examples = "\n".join(
-            [
-                '<tool>{"name":"list_files","args":{"path":"."}}</tool>',
-                '<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
-                '<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
-                '<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
-                '<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
-                "<final>Done.</final>",
-            ]
-        )
         rules = "\n".join(
             [
-                "- Use tools instead of guessing about the workspace.",
-                "- Return exactly one <tool>...</tool> or one <final>...</final>.",
-                "- Tool calls must look like:",
-                '  <tool>{"name":"tool_name","args":{...}}</tool>',
-                "- For write_file and patch_file with multi-line text, prefer XML style:",
-                '  <tool name="write_file" path="file.py"><content>...</content></tool>',
-                "- Final answers must look like:",
-                "  <final>your answer</final>",
+                "- Use the provided tools instead of guessing about the workspace.",
+                "- Call tools through the function-calling interface; never describe a tool call in plain text.",
+                "- When you are done, reply with the final answer as plain text and do not call a tool.",
                 "- Never invent tool results.",
                 "- Keep answers concise and concrete.",
                 "- If the user asks you to create or update a specific file and the path is clear, use write_file or patch_file instead of repeatedly listing files.",
                 "- Before writing tests for existing code, read the implementation first.",
                 "- When writing tests, match the current implementation unless the user explicitly asked you to change the code.",
                 "- New files should be complete and runnable, including obvious imports.",
-                "- Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or return a final answer.",
-                "- Required tool arguments must not be empty. Do not call read_file, write_file, patch_file, run_shell, or delegate with args={}.",
+                "- Do not repeat the same tool call with the same arguments if it did not help. Choose a different tool or give a final answer.",
+                "- Required tool arguments must not be empty.",
             ]
         )
         return "\n\n".join(
             [
                 "You are Mini-Coding-Agent, a small local coding agent running through llama-server.",
                 "Rules:\n" + rules,
-                "Tools:\n" + tool_text,
-                "Valid response examples:\n" + examples,
                 self.workspace.text(),
             ]
         )
@@ -300,50 +276,56 @@ class MiniAgent:
                 memory_text=self.memory_text(),
                 history_text=self.history_text(),
             )
-            raw = self.model_client.complete(
-                system_prompt, user_prompt, self.max_new_tokens
+            response = self.model_client.complete(
+                system_prompt,
+                user_prompt,
+                self.max_new_tokens,
+                tools=self.tools.schemas(),
             )
-            kind, payload = self.parse(raw)
             self.logger.log(
                 "model_output",
                 attempt=attempts,
                 tool_step=tool_steps,
-                parse_kind=kind,
-                raw=clip(raw, 2000),
+                tool_calls=[call.name for call in response.tool_calls],
+                content=clip(response.content, 2000),
             )
 
-            if kind == "tool":
-                tool_steps += 1
-                name = payload.get("name", "")
-                args = payload.get("args", {})
-                self.logger.log("tool_call", name=name, args=args, step=tool_steps)
-                result = self.tools.run(name, args)
-                self.logger.log(
-                    "tool_result",
-                    name=name,
-                    step=tool_steps,
-                    result=clip(result, 2000),
-                )
-                self.record(
-                    ToolMessageEntry(
-                        role="tool",
+            if response.tool_calls:
+                for call in response.tool_calls:
+                    tool_steps += 1
+                    name = call.name
+                    args = call.args
+                    self.logger.log("tool_call", name=name, args=args, step=tool_steps)
+                    result = self.tools.run(name, args)
+                    self.logger.log(
+                        "tool_result",
                         name=name,
-                        args=args,
-                        content=result,
-                        created_at=now(),
+                        step=tool_steps,
+                        result=clip(result, 2000),
                     )
-                )
-                self.note_tool(name, args, result)
+                    self.record(
+                        ToolMessageEntry(
+                            role="tool",
+                            name=name,
+                            args=args,
+                            content=result,
+                            created_at=now(),
+                        )
+                    )
+                    self.note_tool(name, args, result)
+                    if tool_steps >= self.max_steps:
+                        break
                 continue
 
-            if kind == "retry":
-                self.logger.log("retry", attempt=attempts, notice=clip(str(payload), 500))
+            final = response.content.strip()
+            if not final:
+                notice = self.retry_notice("model returned no tool call and no answer")
+                self.logger.log("retry", attempt=attempts, notice=clip(notice, 500))
                 self.record(
-                    MessageEntry(role="assistant", content=payload, created_at=now())
+                    MessageEntry(role="assistant", content=notice, created_at=now())
                 )
                 continue
 
-            final = (payload or raw).strip()
             self.record(MessageEntry(role="assistant", content=final, created_at=now()))
             self.remember(memory.notes, clip(final, 220), 5)
             self.log_memory("final")
@@ -373,130 +355,16 @@ class MiniAgent:
         return final
 
     @staticmethod
-    def parse(raw: str) -> Tuple[str, str | Dict[str, str]]:
-        raw = str(raw)
-        if "<tool>" in raw and (
-            "<final>" not in raw or raw.find("<tool>") < raw.find("<final>")
-        ):
-            body = MiniAgent.extract(raw, "tool")
-            try:
-                payload = json.loads(body)
-            except Exception:
-                return "retry", MiniAgent.retry_notice(
-                    "model returned malformed tool JSON"
-                )
-            if not isinstance(payload, dict):
-                return "retry", MiniAgent.retry_notice(
-                    "tool payload must be a JSON object"
-                )
-            if not str(payload.get("name", "")).strip():
-                return "retry", MiniAgent.retry_notice(
-                    "tool payload is missing a tool name"
-                )
-            args = payload.get("args", {})
-            if args is None:
-                payload["args"] = {}
-            elif not isinstance(args, dict):
-                return "retry", MiniAgent.retry_notice()
-            return "tool", payload
-        if "<tool" in raw and (
-            "<final>" not in raw or raw.find("<tool") < raw.find("<final>")
-        ):
-            payload = MiniAgent.parse_xml_tool(raw)
-            if payload is not None:
-                return "tool", payload
-            return "retry", MiniAgent.retry_notice()
-        if "<final>" in raw:
-            final = MiniAgent.extract(raw, "final").strip()
-            if final:
-                return "final", final
-            return "retry", MiniAgent.retry_notice(
-                "model returned an empty <final> answer"
-            )
-        raw = raw.strip()
-        if raw:
-            return "final", raw
-        return "retry", MiniAgent.retry_notice("model returned an empty response")
-
-    @staticmethod
     def retry_notice(problem: str | None = None) -> str:
         prefix = "Runtime notice"
         if problem:
             prefix += f": {problem}"
         else:
-            prefix += ": model returned malformed tool output"
+            prefix += ": model returned no actionable output"
         return (
-            f"{prefix}. Reply with a valid <tool> call or a non-empty <final> answer. "
-            'For multi-line files, prefer <tool name="write_file" path="file.py"><content>...</content></tool>.'
+            f"{prefix}. Call one of the available tools through the function-calling "
+            "interface, or reply with a non-empty plain-text final answer."
         )
-
-    @staticmethod
-    def parse_xml_tool(raw: str) -> Dict[str, str | Dict[str, str]] | None:
-        match = re.search(r"<tool(?P<attrs>[^>]*)>(?P<body>.*?)</tool>", raw, re.S)
-        if not match:
-            return None
-        attrs = MiniAgent.parse_attrs(match.group("attrs"))
-        name = str(attrs.pop("name", "")).strip()
-        if not name:
-            return None
-
-        body = match.group("body")
-        args = dict(attrs)
-        for key in (
-            "content",
-            "old_text",
-            "new_text",
-            "command",
-            "task",
-            "pattern",
-            "path",
-        ):
-            if f"<{key}>" in body:
-                args[key] = MiniAgent.extract_raw(body, key)
-
-        body_text = body.strip("\n")
-        if name == "write_file" and "content" not in args and body_text:
-            args["content"] = body_text
-        if name == "delegate" and "task" not in args and body_text:
-            args["task"] = body_text.strip()
-        return {"name": name, "args": args}
-
-    @staticmethod
-    def parse_attrs(text: str) -> Dict[str, str]:
-        attrs = {}
-        for match in re.finditer(
-            r"""([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""", text
-        ):
-            attrs[match.group(1)] = (
-                match.group(2) if match.group(2) is not None else match.group(3)
-            )
-        return attrs
-
-    @staticmethod
-    def extract(text: str, tag: str) -> str:
-        start_tag = f"<{tag}>"
-        end_tag = f"</{tag}>"
-        start = text.find(start_tag)
-        if start == -1:
-            return text
-        start += len(start_tag)
-        end = text.find(end_tag, start)
-        if end == -1:
-            return text[start:].strip()
-        return text[start:end].strip()
-
-    @staticmethod
-    def extract_raw(text: str, tag: str) -> str:
-        start_tag = f"<{tag}>"
-        end_tag = f"</{tag}>"
-        start = text.find(start_tag)
-        if start == -1:
-            return text
-        start += len(start_tag)
-        end = text.find(end_tag, start)
-        if end == -1:
-            return text[start:]
-        return text[start:end]
 
     def reset(self: Self) -> None:
         self.session.history = []

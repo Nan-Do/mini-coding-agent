@@ -37,6 +37,19 @@ class ToolMessageEntry:
     created_at: str
 
 
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    args: Dict[str, Any]
+
+
+@dataclass
+class ModelResponse:
+    content: str
+    tool_calls: List[ToolCall]
+
+
 HistoryEntry: TypeAlias = Union[MessageEntry, ToolMessageEntry]
 
 

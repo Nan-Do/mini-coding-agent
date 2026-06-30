@@ -52,7 +52,7 @@ def agent_tool(
     name="list_files",
     description="List files in the workspace.",
     schema={"path": "str='.'"},
-    example='<tool>{"name":"list_files","args":{"path":"."}}</tool>',
+    example='arguments: {"path": "."}',
 )
 def list_files_tool(args: Dict, registry: "ToolRegistry") -> str:
     path = registry._path(args.get("path", "."))
@@ -77,7 +77,7 @@ def list_files_tool(args: Dict, registry: "ToolRegistry") -> str:
     name="read_file",
     description="Read a UTF-8 file by line range.",
     schema={"path": "str", "start": "int=1", "end": "int=200"},
-    example='<tool>{"name":"read_file","args":{"path":"README.md","start":1,"end":80}}</tool>',
+    example='arguments: {"path": "README.md", "start": 1, "end": 80}',
 )
 def read_file_tool(args: Dict, registry: "ToolRegistry") -> str:
     if "path" not in args:
@@ -103,7 +103,7 @@ def read_file_tool(args: Dict, registry: "ToolRegistry") -> str:
     name="search",
     description="Search the workspace with rg or a simple fallback.",
     schema={"pattern": "str", "path": "str='.'"},
-    example='<tool>{"name":"search","args":{"pattern":"binary_search","path":"."}}</tool>',
+    example='arguments: {"pattern": "binary_search", "path": "."}',
 )
 def search_tool(args: Dict, registry: "ToolRegistry") -> str:
     pattern = str(args.get("pattern", "")).strip()
@@ -153,7 +153,7 @@ def search_tool(args: Dict, registry: "ToolRegistry") -> str:
     description="Run a shell command in the repo root.",
     schema={"command": "str", "timeout": "int=20"},
     risky=True,
-    example='<tool>{"name":"run_shell","args":{"command":"uv run --with pytest python -m pytest -q","timeout":20}}</tool>',
+    example='arguments: {"command": "uv run --with pytest python -m pytest -q", "timeout": 20}',
 )
 def run_shell_tool(args: Dict, registry: "ToolRegistry") -> str:
     command = str(args.get("command", "")).strip()
@@ -187,7 +187,7 @@ def run_shell_tool(args: Dict, registry: "ToolRegistry") -> str:
     description="Write a text file.",
     schema={"path": "str", "content": "str"},
     risky=True,
-    example='<tool name="write_file" path="binary_search.py"><content>def binary_search(nums, target):\n    return -1\n</content></tool>',
+    example='arguments: {"path": "binary_search.py", "content": "def binary_search(nums, target):\\n    return -1\\n"}',
 )
 def write_file_tool(args: Dict, registry: "ToolRegistry") -> str:
     if "path" not in args:
@@ -210,7 +210,7 @@ def write_file_tool(args: Dict, registry: "ToolRegistry") -> str:
     description="Replace one exact text block in a file.",
     schema={"path": "str", "old_text": "str", "new_text": "str"},
     risky=True,
-    example='<tool name="patch_file" path="binary_search.py"><old_text>return -1</old_text><new_text>return mid</new_text></tool>',
+    example='arguments: {"path": "binary_search.py", "old_text": "return -1", "new_text": "return mid"}',
 )
 def patch_file_tool(args: Dict, registry: "ToolRegistry") -> str:
     if "path" not in args:
@@ -239,7 +239,7 @@ def patch_file_tool(args: Dict, registry: "ToolRegistry") -> str:
     name="delegate",
     description="Ask a bounded read-only child agent to investigate.",
     schema={"task": "str", "max_steps": "int=3"},
-    example='<tool>{"name":"delegate","args":{"task":"inspect README.md","max_steps":3}}</tool>',
+    example='arguments: {"task": "inspect README.md", "max_steps": 3}',
 )
 def delegate_tool(args: Dict, registry: "ToolRegistry") -> str:
     if registry.delegate_fn is None:
@@ -283,6 +283,50 @@ class ToolRegistry:
     def items(self):
         return self._registry.items()
 
+    _JSON_TYPES = {
+        "str": "string",
+        "int": "integer",
+        "float": "number",
+        "bool": "boolean",
+    }
+
+    @classmethod
+    def _field_schema(cls, spec: str) -> tuple[dict, bool]:
+        """Convert a "type[=default]" field spec into a JSON-schema property.
+
+        Returns the property schema and whether the field is required.
+        """
+        type_token, sep, _default = str(spec).partition("=")
+        json_type = cls._JSON_TYPES.get(type_token.strip(), "string")
+        return {"type": json_type}, sep == ""
+
+    def schemas(self) -> List[Dict]:
+        """Return the registered tools as OpenAI-style JSON-schema definitions."""
+        definitions = []
+        for name, tool in self._registry.items():
+            properties = {}
+            required = []
+            for field, spec in tool.schema.items():
+                prop, is_required = self._field_schema(spec)
+                properties[field] = prop
+                if is_required:
+                    required.append(field)
+            definitions.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": name,
+                        "description": tool.description,
+                        "parameters": {
+                            "type": "object",
+                            "properties": properties,
+                            "required": required,
+                        },
+                    },
+                }
+            )
+        return definitions
+
     def run(self, name: str, args: Dict) -> str:
         tool = self._registry.get(name, None)
         if tool is None:
@@ -290,7 +334,9 @@ class ToolRegistry:
             return f"error: unknown tool '{name}'"
 
         if self._repeated_call(name, args):
-            self.logger.log("tool_blocked", name=name, args=args, reason="repeated_call")
+            self.logger.log(
+                "tool_blocked", name=name, args=args, reason="repeated_call"
+            )
             return f"error: repeated identical tool call for {name}; choose a different tool or return a final answer"
 
         if tool.risky:
