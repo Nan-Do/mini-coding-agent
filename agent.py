@@ -142,7 +142,6 @@ class MiniAgent:
             [
                 "You are Mini-Coding-Agent, a small local coding agent running through llama-server.",
                 "Rules:\n" + rules,
-                self.workspace.text(),
             ]
         )
 
@@ -200,6 +199,7 @@ class MiniAgent:
     def prompt(self: Self, user_message: str) -> Tuple[str, str]:
         return self.prefix, "\n\n".join(
             [
+                self.workspace.text(),
                 self.memory_text(),
                 "Transcript:\n" + self.history_text(),
                 "Current user request:\n" + user_message,
