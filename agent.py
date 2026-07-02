@@ -7,7 +7,7 @@ from agent_logging import AgentLogger
 from model_clients import LlamaCppModelClient
 from session import SessionStore
 from tools import ToolRegistry
-from typing import Dict, List, Self, Tuple
+from typing import Callable, Dict, List, Self, Tuple
 from workspace import WorkspaceContext
 from app_types import (
     HistoryEntry,
@@ -37,12 +37,14 @@ class MiniAgent:
         max_depth: int = 1,
         read_only: bool = False,
         logger: AgentLogger | None = None,
+        approval_fn: Callable[[str, Dict], bool] | None = None,
     ) -> None:
         self.model_client = model_client
         self.workspace = workspace
         self.root = Path(workspace.repo_root)
         self.session_store = session_store
         self.approval_policy = approval_policy
+        self.approval_fn = approval_fn
         self.max_steps = max_steps
         self.max_new_tokens = max_new_tokens
         self.depth = depth
@@ -75,6 +77,7 @@ class MiniAgent:
             get_history=lambda: self.session.history,
             delegate_fn=self._make_delegate if self.depth < self.max_depth else None,
             logger=self.logger,
+            approval_fn=self.approval_fn,
         )
         self.prefix = self.build_prefix()
         self.session_path = self.session_store.save(self.session)
@@ -247,7 +250,25 @@ class MiniAgent:
         self.remember(memory.notes, note, 5)
         self.log_memory(f"note_tool:{name}")
 
-    def ask(self: Self, user_message: str) -> str:
+    def _emit(
+        self: Self,
+        on_event: Callable[..., None] | None,
+        event_type: str,
+        **data: object,
+    ) -> None:
+        if on_event is None:
+            return
+        try:
+            on_event(event_type, **data)
+        except Exception:
+            # The UI callback must never break the agent loop.
+            self.logger.log("event_callback_error", event_type=event_type)
+
+    def ask(
+        self: Self,
+        user_message: str,
+        on_event: Callable[..., None] | None = None,
+    ) -> str:
         memory = self.session.memory
         if not memory.task:
             memory.task = clip(user_message.strip(), 300)
@@ -266,6 +287,7 @@ class MiniAgent:
 
         while tool_steps < self.max_steps and attempts < max_attempts:
             attempts += 1
+            self._emit(on_event, "thinking", attempt=attempts, step=tool_steps)
             system_prompt, user_prompt = self.prompt(user_message)
             self.logger.log(
                 "prompt_built",
@@ -296,12 +318,22 @@ class MiniAgent:
                     name = call.name
                     args = call.args
                     self.logger.log("tool_call", name=name, args=args, step=tool_steps)
+                    self._emit(
+                        on_event, "tool_call", name=name, args=args, step=tool_steps
+                    )
                     result = self.tools.run(name, args)
                     self.logger.log(
                         "tool_result",
                         name=name,
                         step=tool_steps,
                         result=clip(result, 2000),
+                    )
+                    self._emit(
+                        on_event,
+                        "tool_result",
+                        name=name,
+                        result=result,
+                        step=tool_steps,
                     )
                     self.record(
                         ToolMessageEntry(
@@ -321,6 +353,7 @@ class MiniAgent:
             if not final:
                 notice = self.retry_notice("model returned no tool call and no answer")
                 self.logger.log("retry", attempt=attempts, notice=clip(notice, 500))
+                self._emit(on_event, "retry", notice=notice)
                 self.record(
                     MessageEntry(role="assistant", content=notice, created_at=now())
                 )
@@ -336,6 +369,7 @@ class MiniAgent:
                 attempts=attempts,
                 final=clip(final, 2000),
             )
+            self._emit(on_event, "final", text=final)
             return final
 
         if attempts >= max_attempts and tool_steps < self.max_steps:
@@ -352,6 +386,7 @@ class MiniAgent:
             attempts=attempts,
             final=clip(final, 2000),
         )
+        self._emit(on_event, "final", text=final, reason=reason)
         return final
 
     @staticmethod

@@ -268,6 +268,7 @@ class ToolRegistry:
         get_history: Callable[[], List[HistoryEntry]],
         delegate_fn: Callable[[str, int], str] | None = None,
         logger: AgentLogger | None = None,
+        approval_fn: Callable[[str, Dict], bool] | None = None,
     ) -> None:
         self.workspace = workspace
         self.root = root
@@ -278,6 +279,7 @@ class ToolRegistry:
         self.get_history = get_history
         self.delegate_fn = delegate_fn
         self.logger = logger or AgentLogger(None, enabled=False)
+        self.approval_fn = approval_fn
         self._registry: Tools = self._build()
 
     def items(self):
@@ -422,6 +424,8 @@ class ToolRegistry:
             return True
         if self.approval_policy == "never":
             return False
+        if self.approval_fn is not None:
+            return bool(self.approval_fn(name, args))
         try:
             answer = input(
                 f"approve {name} {json.dumps(args, ensure_ascii=True)}? [y/N] "

@@ -1,5 +1,4 @@
 import argparse
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -8,54 +7,9 @@ from agent import MiniAgent
 from agent_logging import AgentLogger
 from model_clients import LlamaCppModelClient
 from session import SessionStore
-from utils import HELP_DETAILS, WELCOME_ART, clip, middle
+from tui import run_tui
+from utils import clip
 from workspace import WorkspaceContext
-
-
-def build_welcome(agent: MiniAgent, model: str, context: int, host: str) -> str:
-    width = max(68, min(shutil.get_terminal_size((80, 20)).columns, 84))
-    inner = width - 4
-    gap = 3
-    left_width = (inner - gap) // 2
-    right_width = inner - gap - left_width
-
-    def row(text: str) -> str:
-        body = middle(text, width - 4)
-        return f"| {body.ljust(width - 4)} |"
-
-    def divider(char: str = "-") -> str:
-        return "+" + char * (width - 2) + "+"
-
-    def center(text: str) -> str:
-        body = middle(text, inner)
-        return f"| {body.center(inner)} |"
-
-    def cell(label: str, value: str, size: int) -> str:
-        body = middle(f"{label:<9} {value}", size)
-        return body.ljust(size)
-
-    def pair(
-        left_label: str, left_value: str, right_label: str, right_value: str
-    ) -> str:
-        left = cell(left_label, left_value, left_width)
-        right = cell(right_label, right_value, right_width)
-        return f"| {left}{' ' * gap}{right} |"
-
-    line = divider("=")
-    rows = [center(text) for text in WELCOME_ART]
-    rows.extend(
-        [
-            center("MINI CODING AGENT"),
-            divider("-"),
-            row(""),
-            row("WORKSPACE  " + middle(agent.workspace.cwd, inner - 11)),
-            pair("MODEL", model, "BRANCH", agent.workspace.branch),
-            pair("CONTEXT", str(context), "ENDPOINT", host),
-            pair("APPROVAL", agent.approval_policy, "SESSION", agent.session.id),
-            row(""),
-        ]
-    )
-    return "\n".join([line, *rows, line])
 
 
 def build_logger(args: argparse.Namespace, repo_root: str) -> AgentLogger:
@@ -110,6 +64,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="Minimal coding agent for llama-server models.",
     )
     parser.add_argument("prompt", nargs="*", help="Optional one-shot prompt.")
+    parser.add_argument(
+        "--mode",
+        choices=("auto", "tui", "headless"),
+        default="auto",
+        help=(
+            "Interface mode. 'tui' launches the interactive Textual UI, "
+            "'headless' runs a single request and prints the answer, "
+            "'auto' picks headless when a prompt/piped input is present and the "
+            "TUI otherwise."
+        ),
+    )
     parser.add_argument("--cwd", default=".", help="Workspace directory.")
     parser.add_argument(
         "--model",
@@ -172,75 +137,58 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_mode(mode: str, prompt: str) -> str:
+    """Decide between the headless and TUI front-ends."""
+    if mode != "auto":
+        return mode
+    # A prompt argument or piped stdin means a non-interactive, scriptable run.
+    if prompt or not sys.stdin.isatty():
+        return "headless"
+    return "tui"
+
+
+def read_prompt(args: argparse.Namespace) -> str:
+    prompt = " ".join(args.prompt).strip()
+    print(f"Prompt: {prompt}")
+    if prompt:
+        return prompt
+    if not sys.stdin.isatty():
+        return sys.stdin.read().strip()
+    return ""
+
+
+def run_headless(agent: MiniAgent, prompt: str) -> int:
+    if not prompt:
+        print("headless mode needs a prompt argument or piped stdin", file=sys.stderr)
+        return 2
+    agent.logger.log("repl_input", mode="headless", text=clip(prompt, 2000))
+    try:
+        print(agent.ask(prompt))
+    except RuntimeError as exc:
+        agent.logger.log("repl_error", mode="headless", error=str(exc))
+        print(str(exc), file=sys.stderr)
+        return 1
+    return 0
+
+
 def main() -> int:
     args = build_arg_parser().parse_args()
+    prompt = read_prompt(args)
+    mode = resolve_mode(args.mode, prompt)
+
     agent = build_agent(args)
+    endpoint = f"{args.host}:{args.port}"
 
-    print(
-        build_welcome(
-            agent,
-            model=agent.model_client.model,
-            context=agent.model_client.ctx,
-            host=args.host + f":{args.port}",
-        )
+    if mode == "headless":
+        return run_headless(agent, prompt)
+
+    return run_tui(
+        agent,
+        model=agent.model_client.model,
+        context=agent.model_client.ctx,
+        endpoint=endpoint,
     )
-
-    if args.prompt:
-        prompt = " ".join(args.prompt).strip()
-        if prompt:
-            print()
-            agent.logger.log("repl_input", mode="one_shot", text=clip(prompt, 2000))
-            try:
-                print(agent.ask(prompt))
-            except RuntimeError as exc:
-                agent.logger.log("repl_error", mode="one_shot", error=str(exc))
-                print(str(exc), file=sys.stderr)
-                return 1
-        return 0
-
-    while True:
-        try:
-            user_input = input("\nmini-coding-agent> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            agent.logger.log("repl_exit", reason="eof_or_interrupt")
-            print("")
-            return 0
-
-        if not user_input:
-            continue
-        if user_input in {"/exit", "/quit"}:
-            agent.logger.log("repl_command", command=user_input)
-            return 0
-        if user_input == "/help":
-            agent.logger.log("repl_command", command=user_input)
-            print(HELP_DETAILS)
-            continue
-        if user_input == "/memory":
-            agent.logger.log("repl_command", command=user_input)
-            print(agent.memory_text())
-            continue
-        if user_input == "/session":
-            agent.logger.log("repl_command", command=user_input)
-            print(agent.session_path)
-            continue
-        if user_input == "/log":
-            agent.logger.log("repl_command", command=user_input)
-            print(agent.log_path)
-            continue
-        if user_input == "/reset":
-            agent.logger.log("repl_command", command=user_input)
-            agent.reset()
-            print("session reset")
-            continue
-
-        print()
-        agent.logger.log("repl_input", mode="interactive", text=clip(user_input, 2000))
-        try:
-            print(agent.ask(user_input))
-        except RuntimeError as exc:
-            agent.logger.log("repl_error", mode="interactive", error=str(exc))
-            print(str(exc), file=sys.stderr)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

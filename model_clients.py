@@ -1,6 +1,6 @@
 import json
 
-from typing import Dict, List, Self, Sequence
+from typing import Dict, List, Self
 
 from openai import OpenAI, OpenAIError
 

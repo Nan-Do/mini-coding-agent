@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 
 DOC_NAMES = ("AGENTS.md", "README.md", "pyproject.toml", "package.json")
-HELP_TEXT = "/help, /memory, /session, /log, /reset, /exit"
+HELP_TEXT = "/help, /memory, /session, /log, /reset, /clear, /exit"
 WELCOME_ART = (
     "/\\     /\\\\",
     "{  `---'  }",
@@ -19,6 +19,7 @@ HELP_DETAILS = "\n".join(
         "/session Show the path to the saved session file.",
         "/log     Show the path to the current JSONL run log.",
         "/reset   Clear the current session history and memory.",
+        "/clear   Clear the conversation view (keeps the session).",
         "/exit    Exit the agent.",
     ]
 )
