@@ -149,7 +149,6 @@ def resolve_mode(mode: str, prompt: str) -> str:
 
 def read_prompt(args: argparse.Namespace) -> str:
     prompt = " ".join(args.prompt).strip()
-    print(f"Prompt: {prompt}")
     if prompt:
         return prompt
     if not sys.stdin.isatty():
